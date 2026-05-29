@@ -47,13 +47,21 @@ pub(crate) fn write_call_targets_output(
     ctx: &ExecutionContext,
     label: &str,
     prepared_reference: &Path,
+    output_path: &Path,
     ref_names: &[String],
     sample_names: &[String],
     counts: BTreeMap<SiteKey, SiteCounts>,
 ) -> Result<()> {
     let total_sites = counts.len();
-    let mut state =
-        begin_call_targets_output(args, ctx, label, prepared_reference, ref_names, sample_names)?;
+    let mut state = begin_call_targets_output(
+        args,
+        ctx,
+        label,
+        prepared_reference,
+        output_path,
+        ref_names,
+        sample_names,
+    )?;
     write_call_targets_output_chunk(
         &mut state,
         args,
@@ -71,6 +79,7 @@ pub(crate) fn begin_call_targets_output(
     ctx: &ExecutionContext,
     label: &str,
     prepared_reference: &Path,
+    output_path: &Path,
     ref_names: &[String],
     sample_names: &[String],
 ) -> Result<CallTargetsOutputState> {
@@ -84,7 +93,6 @@ pub(crate) fn begin_call_targets_output(
         ),
     );
 
-    let output_path = &args.output;
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {

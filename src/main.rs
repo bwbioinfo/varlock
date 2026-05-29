@@ -77,13 +77,13 @@ pub struct CallTargetsArgs {
     #[arg(short = 'r', long = "reference", value_name = "FASTA")]
     pub reference: PathBuf,
 
-    /// BED file of target intervals (0-based, half-open)
+    /// BED file of target intervals (0-based, half-open); omit to call all covered positions
     #[arg(short = 'T', long = "targets", value_name = "BED")]
-    pub targets: PathBuf,
+    pub targets: Option<PathBuf>,
 
-    /// Output VCF.gz path
+    /// Output VCF.gz path (default: derived from first input basename)
     #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
 
     /// Read-group to sample mapping file (RG<tab>SM)
     #[arg(long = "rg-map", value_name = "FILE")]

@@ -21,12 +21,30 @@ use crate::{CallTargetsArgs, ExecutionContext, log_verbose};
 use pileup::{InputResult, PileupSettings, ScanParams, merge_counts, process_input_bam};
 use samples::{collect_samples, read_rg_map};
 use targets::load_targets;
-use types::{PreparedCallTargets, SiteCounts, SiteKey};
+use types::{Interval, PreparedCallTargets, SiteCounts, SiteKey, TargetIndex};
+
+fn derive_output(resolved_inputs: &[PathBuf], bamlist: Option<&std::path::Path>) -> PathBuf {
+    let source = resolved_inputs
+        .first()
+        .map(|p| p.as_path())
+        .or(bamlist);
+    let stem = source
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    PathBuf::from(format!("{stem}.vcf.gz"))
+}
 
 pub fn run(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<()> {
     let label = "call_targets";
     let prepared = prepare_call_targets(&args, ctx, label)?;
     let sample_count = prepared.sample_names.len();
+
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| derive_output(&prepared.inputs, args.bamlist.as_deref()));
+    log_verbose(ctx, format!("{label} output: {}", output.display()));
 
     let scan_started = Instant::now();
     let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
@@ -68,6 +86,7 @@ pub fn run(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<()> {
         ctx,
         label,
         &prepared.prepared_reference,
+        &output,
         &prepared.ref_names,
         &prepared.sample_names,
         all_counts,
@@ -126,10 +145,21 @@ pub(crate) fn prepare_call_targets(
     );
 
     let stage_started = Instant::now();
-    let targets = load_targets(&args.targets, &ref_name_to_id)?;
-    if targets.by_ref.is_empty() {
-        bail!("no target intervals match the BAM reference sequences");
-    }
+    let targets = match &args.targets {
+        Some(path) => {
+            let t = load_targets(path, &ref_name_to_id)?;
+            if t.by_ref.is_empty() {
+                bail!("no target intervals match the BAM reference sequences");
+            }
+            t
+        }
+        None => TargetIndex {
+            by_ref: ref_name_to_id
+                .values()
+                .map(|&id| (id, vec![Interval { start: 0, end: u64::MAX }]))
+                .collect(),
+        },
+    };
     log_verbose(
         ctx,
         format!(
@@ -165,7 +195,10 @@ pub(crate) fn prepare_call_targets(
 
     log_verbose(ctx, format!("{label} inputs: {} BAMs", inputs.len()));
     log_verbose(ctx, format!("{label} samples: {:?}", sample_names));
-    log_verbose(ctx, format!("{label} targets: {}", args.targets.display()));
+    match &args.targets {
+        Some(path) => log_verbose(ctx, format!("{label} targets: {}", path.display())),
+        None => log_verbose(ctx, format!("{label} targets: all covered positions")),
+    }
     log_verbose(
         ctx,
         format!("{label} reference: {}", args.reference.display()),
