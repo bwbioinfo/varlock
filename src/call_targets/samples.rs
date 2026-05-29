@@ -9,6 +9,8 @@ use anyhow::{Context, Result, bail};
 use noodles_bam::io::Reader;
 use noodles_sam as sam;
 
+pub(crate) const DEFAULT_SAMPLE_NAME: &str = "SAMPLE";
+
 pub(crate) fn collect_samples(
     paths: &[PathBuf],
     rg_map: Option<&[(String, String)]>,
@@ -39,6 +41,9 @@ pub(crate) fn collect_samples(
     let mut samples: Vec<String> = rg_to_sm.values().cloned().collect();
     samples.sort();
     samples.dedup();
+    if samples.is_empty() {
+        samples.push(DEFAULT_SAMPLE_NAME.to_string());
+    }
 
     Ok((samples, rg_to_sm))
 }
@@ -123,10 +128,10 @@ fn rg_to_sm_from_header(header: &sam::Header) -> Result<HashMap<String, String>>
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use super::{DEFAULT_SAMPLE_NAME, build_rg_to_sm_from_map, read_rg_map};
     use anyhow::Result;
+    use std::io::Write;
     use tempfile::NamedTempFile;
-    use super::{build_rg_to_sm_from_map, read_rg_map};
 
     #[test]
     fn read_rg_map_parses_tab_separated_lines() -> Result<()> {
@@ -195,5 +200,10 @@ mod tests {
         let rows: Vec<(String, String)> = vec![];
         let err = build_rg_to_sm_from_map(&rows).unwrap_err();
         assert!(err.to_string().contains("did not contain any"));
+    }
+
+    #[test]
+    fn default_sample_name_is_vcf_safe() {
+        assert_eq!(DEFAULT_SAMPLE_NAME, "SAMPLE");
     }
 }

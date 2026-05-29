@@ -11,6 +11,7 @@ use noodles_bam::io::Reader;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use noodles_sam::alignment::{record::cigar::Op, record::cigar::op::Kind};
 
+use super::samples::DEFAULT_SAMPLE_NAME;
 use super::targets::in_targets;
 use super::types::{SiteCounts, SiteKey, TargetIndex, base_index};
 
@@ -73,7 +74,12 @@ pub(crate) fn process_input_bam(path: &Path, scan: &ScanParams<'_>) -> Result<In
             }
         };
 
-        if !scan.pileup.targets.by_ref.contains_key(&reference_sequence_id) {
+        if !scan
+            .pileup
+            .targets
+            .by_ref
+            .contains_key(&reference_sequence_id)
+        {
             continue;
         }
 
@@ -138,10 +144,7 @@ pub(crate) fn merge_counts(
             bail!("inconsistent sample vector length while merging counts");
         }
 
-        for (dst_sample, src_sample) in dst_entry
-            .per_sample
-            .iter_mut()
-            .zip(site_counts.per_sample)
+        for (dst_sample, src_sample) in dst_entry.per_sample.iter_mut().zip(site_counts.per_sample)
         {
             merge_sample_counts_with_cap(dst_sample, src_sample, max_depth);
         }
@@ -214,6 +217,10 @@ fn record_sample<'a>(
     record: &bam::Record,
     rg_to_sm: &'a HashMap<String, String>,
 ) -> Result<Option<&'a str>> {
+    if rg_to_sm.is_empty() {
+        return Ok(Some(DEFAULT_SAMPLE_NAME));
+    }
+
     match record.data().get(&Tag::READ_GROUP) {
         None => Ok(None),
         Some(Ok(Value::String(value))) | Some(Ok(Value::Hex(value))) => {
@@ -306,13 +313,18 @@ fn pileup_record(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use anyhow::Result;
-    use super::{merge_counts, merge_sample_counts_with_cap};
+    use super::super::samples::DEFAULT_SAMPLE_NAME;
     use super::super::types::{SiteCounts, SiteKey};
+    use super::{merge_counts, merge_sample_counts_with_cap, record_sample};
+    use anyhow::Result;
+    use noodles_bam as bam;
+    use std::collections::{BTreeMap, HashMap};
 
     fn site(ref_id: usize, pos: u32) -> SiteKey {
-        SiteKey { reference_sequence_id: ref_id, position: pos }
+        SiteKey {
+            reference_sequence_id: ref_id,
+            position: pos,
+        }
     }
 
     fn counts(per_sample: Vec<[u32; 4]>) -> SiteCounts {
@@ -401,6 +413,18 @@ mod tests {
         second.insert(site(0, 1), counts(vec![[0, 0, 1, 0]])); // 1 sample vs 2
         let err = merge_counts(&mut all, second, 1000).unwrap_err();
         assert!(err.to_string().contains("inconsistent sample vector"));
+        Ok(())
+    }
+
+    #[test]
+    fn record_sample_uses_default_sample_when_rg_mapping_is_empty() -> Result<()> {
+        let record = bam::Record::default();
+        let rg_to_sm = HashMap::new();
+
+        assert_eq!(
+            record_sample(&record, &rg_to_sm)?,
+            Some(DEFAULT_SAMPLE_NAME)
+        );
         Ok(())
     }
 }

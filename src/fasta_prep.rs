@@ -376,11 +376,8 @@ fn create_temp_work_dir() -> Result<TempWorkDir> {
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX_EPOCH")?
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "varlock_fasta_prep_{}_{}",
-        std::process::id(),
-        now
-    ));
+    let path =
+        std::env::temp_dir().join(format!("varlock_fasta_prep_{}_{}", std::process::id(), now));
     std::fs::create_dir_all(&path)
         .with_context(|| format!("failed to create temporary directory {}", path.display()))?;
     Ok(TempWorkDir { path })
@@ -485,11 +482,11 @@ fn build_gzi_index_for_bgzf(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Read, io::Write, path::Path};
+    use super::{gzi_path, prepare_reference, primary_fai_path};
     use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
+    use std::{fs::File, io::Read, io::Write, path::Path};
     use tempfile::tempdir;
-    use super::{gzi_path, prepare_reference, primary_fai_path};
 
     fn read_bgzf_to_string(path: &Path) -> Result<String> {
         let file =
@@ -513,14 +510,19 @@ mod tests {
         assert!(prepared.exists());
         assert!(primary_fai_path(&prepared).exists());
         assert!(gzi_path(&prepared).exists());
-        assert!(prepared
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("gz"))
-            .unwrap_or(false));
+        assert!(
+            prepared
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("gz"))
+                .unwrap_or(false)
+        );
 
         let text = read_bgzf_to_string(&prepared)?;
-        assert!(text.starts_with(">chr1\n"), "expected chr1 first, got: {text}");
+        assert!(
+            text.starts_with(">chr1\n"),
+            "expected chr1 first, got: {text}"
+        );
         Ok(())
     }
 
@@ -539,7 +541,10 @@ mod tests {
         assert!(gzi_path(&prepared).exists());
 
         let text = read_bgzf_to_string(&prepared)?;
-        assert!(text.starts_with(">chrA\n"), "expected chrA first, got: {text}");
+        assert!(
+            text.starts_with(">chrA\n"),
+            "expected chrA first, got: {text}"
+        );
         Ok(())
     }
 

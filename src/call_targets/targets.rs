@@ -87,11 +87,11 @@ pub(crate) fn in_targets(intervals: &[Interval], pos0: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, io::Write};
-    use anyhow::Result;
-    use tempfile::NamedTempFile;
-    use super::{in_targets, load_targets};
     use super::super::types::Interval;
+    use super::{in_targets, load_targets};
+    use anyhow::Result;
+    use std::{collections::HashMap, io::Write};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn in_targets_hit_inside_interval() {

@@ -432,11 +432,7 @@ fn write_vcf_record<W: Write>(
     Ok(())
 }
 
-fn choose_alt(
-    ref_base: u8,
-    counts: &SiteCounts,
-    min_alt_count: u32,
-) -> Result<(Option<u8>, u32)> {
+fn choose_alt(ref_base: u8, counts: &SiteCounts, min_alt_count: u32) -> Result<(Option<u8>, u32)> {
     let mut totals = [0u32; 4];
     for sample in &counts.per_sample {
         for (i, value) in sample.iter().enumerate() {
@@ -480,8 +476,8 @@ fn elapsed_ns(start: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::choose_alt;
     use super::super::types::SiteCounts;
+    use super::choose_alt;
 
     fn counts(per_sample: Vec<[u32; 4]>) -> SiteCounts {
         SiteCounts { per_sample }

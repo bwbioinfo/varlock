@@ -24,10 +24,7 @@ use targets::load_targets;
 use types::{Interval, PreparedCallTargets, SiteCounts, SiteKey, TargetIndex};
 
 fn derive_output(resolved_inputs: &[PathBuf], bamlist: Option<&std::path::Path>) -> PathBuf {
-    let source = resolved_inputs
-        .first()
-        .map(|p| p.as_path())
-        .or(bamlist);
+    let source = resolved_inputs.first().map(|p| p.as_path()).or(bamlist);
     let stem = source
         .and_then(|p| p.file_stem())
         .and_then(|s| s.to_str())
@@ -156,7 +153,15 @@ pub(crate) fn prepare_call_targets(
         None => TargetIndex {
             by_ref: ref_name_to_id
                 .values()
-                .map(|&id| (id, vec![Interval { start: 0, end: u64::MAX }]))
+                .map(|&id| {
+                    (
+                        id,
+                        vec![Interval {
+                            start: 0,
+                            end: u64::MAX,
+                        }],
+                    )
+                })
                 .collect(),
         },
     };
@@ -176,9 +181,6 @@ pub(crate) fn prepare_call_targets(
         .map(|path| read_rg_map(path.as_path()))
         .transpose()?;
     let (sample_names, rg_to_sm) = collect_samples(&inputs, rg_map.as_deref())?;
-    if sample_names.is_empty() {
-        bail!("no samples found from RG/SM mapping");
-    }
     log_verbose(
         ctx,
         format!(
