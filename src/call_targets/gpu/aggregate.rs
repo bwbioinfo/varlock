@@ -81,7 +81,9 @@ pub(crate) fn create_chunk_states(
         let counts_buffer = runtime.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("varlock.call_targets_gpu.aggregate.counts"),
             size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         if buffer_size > 0 {
