@@ -59,24 +59,40 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     log_verbose(ctx, format!("{label} output: {}", output.display()));
 
     let tier = classify_adapter(&runtime.adapter_info);
-    let tuning = auto_tuning_for_tier(tier);
-    let matrix_budget = effective_matrix_budget(&runtime.limits, tuning.stream_matrix_budget_bytes);
+    let auto = auto_tuning_for_tier(tier);
+
+    // Apply user overrides on top of tier defaults, then clamp to hardware limits.
+    let requested_budget = args
+        .matrix_budget_mib
+        .map(|mib| mib.saturating_mul(1024 * 1024))
+        .unwrap_or(auto.stream_matrix_budget_bytes);
+    let requested_obs = args.max_obs_upload.unwrap_or(auto.max_obs_upload);
+
+    let matrix_budget = effective_matrix_budget(&runtime.limits, requested_budget);
     let max_obs_upload = runtime::effective_max_obs_upload(
         &runtime.limits,
-        tuning.max_obs_upload,
+        requested_obs,
         size_of::<observation::Observation>(),
         kernel::WORKGROUP_SIZE as usize,
     );
-    log_verbose(
-        ctx,
-        format!(
-            "{label} adapter={:?} tier={:?} matrix_budget={}MiB max_obs_upload={}",
-            runtime.adapter_info.name,
-            tier,
-            matrix_budget / (1024 * 1024),
-            max_obs_upload
-        ),
-    );
+    let flush_threshold = args.obs_flush_threshold.unwrap_or(max_obs_upload);
+
+    if ctx.verbose > 0 {
+        let auto_budget_mib = auto.stream_matrix_budget_bytes / (1024 * 1024);
+        let eff_budget_mib = matrix_budget / (1024 * 1024);
+        let budget_note = if args.matrix_budget_mib.is_some() { " (override)" } else { " (auto)" };
+        let obs_note = if args.max_obs_upload.is_some() { " (override)" } else { " (auto)" };
+        let flush_note = if args.obs_flush_threshold.is_some() { " (override)" } else { "" };
+        eprintln!(
+            "[{label}] adapter=\"{}\" tier={tier:?} \
+             auto: matrix_budget={auto_budget_mib}MiB max_obs_upload={} \
+             effective: matrix_budget={eff_budget_mib}MiB{budget_note} \
+             max_obs_upload={max_obs_upload}{obs_note} \
+             flush_threshold={flush_threshold}{flush_note}",
+            runtime.adapter_info.name, auto.max_obs_upload,
+        );
+    }
+
     let kernel = create_kernel(&runtime, max_obs_upload)?;
 
     let all_counts = if args.call.targets.is_some() {
@@ -100,6 +116,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
             &prepared,
             sample_count,
             matrix_budget,
+            flush_threshold,
         )?
     };
 
@@ -238,10 +255,8 @@ fn run_covered_gpu_path(
     prepared: &super::types::PreparedCallTargets,
     sample_count: usize,
     matrix_budget: usize,
+    flush_threshold: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
-    // Flush when pending buffer holds this many observations to bound peak RAM.
-    // Using max_obs_upload gives one GPU dispatch per flush, balancing overhead.
-    let flush_threshold = kernel.max_obs_upload;
 
     log_verbose(
         ctx,

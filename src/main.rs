@@ -12,6 +12,18 @@ mod fasta_prep;
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
+#[cfg(feature = "wgpu")]
+fn parse_nonzero_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid integer: {value}"))?;
+    if parsed > 0 {
+        Ok(parsed)
+    } else {
+        Err("must be greater than 0".to_string())
+    }
+}
+
 fn parse_fraction(value: &str) -> std::result::Result<f64, String> {
     let parsed = value
         .parse::<f64>()
@@ -70,6 +82,21 @@ pub struct CallTargetsGpuArgs {
     /// wgpu backend selection
     #[arg(long = "gpu-backend", value_enum, default_value_t = GpuBackend::All)]
     pub gpu_backend: GpuBackend,
+
+    /// Override GPU count-matrix budget in MiB (default: auto per GPU tier;
+    /// capped by adapter max_storage_buffer_binding_size)
+    #[arg(long = "matrix-budget-mib", value_name = "MIB", value_parser = parse_nonzero_usize)]
+    pub matrix_budget_mib: Option<usize>,
+
+    /// Override max observations per GPU kernel dispatch (default: auto per GPU tier;
+    /// capped by adapter binding and workgroup limits)
+    #[arg(long = "max-obs-upload", value_name = "COUNT", value_parser = parse_nonzero_usize)]
+    pub max_obs_upload: Option<usize>,
+
+    /// Override the observation flush threshold for no-target streaming (default: equals
+    /// effective max-obs-upload; reduce to lower peak RAM at the cost of more GPU dispatches)
+    #[arg(long = "obs-flush-threshold", value_name = "COUNT", value_parser = parse_nonzero_usize)]
+    pub obs_flush_threshold: Option<usize>,
 }
 
 #[cfg(feature = "wgpu")]
