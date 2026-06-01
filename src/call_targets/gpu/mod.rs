@@ -5,6 +5,7 @@ pub(crate) mod scan;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    mem::size_of,
     sync::Arc,
     time::Instant,
 };
@@ -58,7 +59,22 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     let tier = classify_adapter(&runtime.adapter_info);
     let tuning = auto_tuning_for_tier(tier);
     let matrix_budget = effective_matrix_budget(&runtime.limits, tuning.stream_matrix_budget_bytes);
-    let kernel = create_kernel(&runtime, tuning.max_obs_upload)?;
+    let max_obs_upload = runtime::effective_max_obs_upload(
+        &runtime.limits,
+        tuning.max_obs_upload,
+        size_of::<observation::Observation>(),
+    );
+    log_verbose(
+        ctx,
+        format!(
+            "{label} adapter={:?} tier={:?} matrix_budget={}MiB max_obs_upload={}",
+            runtime.adapter_info.name,
+            tier,
+            matrix_budget / (1024 * 1024),
+            max_obs_upload
+        ),
+    );
+    let kernel = create_kernel(&runtime, max_obs_upload)?;
 
     let all_counts = if args.call.targets.is_some() {
         run_static_target_gpu_path(

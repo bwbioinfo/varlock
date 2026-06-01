@@ -144,6 +144,20 @@ pub(crate) fn effective_matrix_budget(limits: &wgpu::Limits, requested_budget: u
         .max(1)
 }
 
+/// Cap max_obs_upload so the obs buffer never exceeds GPU binding or buffer-size limits.
+/// obs_size_bytes is size_of::<Observation>() — passed in to avoid importing that type here.
+pub(crate) fn effective_max_obs_upload(
+    limits: &wgpu::Limits,
+    requested: usize,
+    obs_size_bytes: usize,
+) -> usize {
+    let max_bytes = (limits.max_storage_buffer_binding_size as usize)
+        .min(limits.max_buffer_size as usize);
+    requested
+        .min(max_bytes / obs_size_bytes.max(1))
+        .max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +247,23 @@ mod tests {
             32 * 1024 * 1024
         );
         assert_eq!(effective_matrix_budget(&limits, 0), 1);
+    }
+
+    #[test]
+    fn effective_max_obs_upload_caps_by_binding_and_buffer_limits() {
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: 128 * 1024 * 1024, // 128 MiB
+            max_buffer_size: 256 * 1024 * 1024,
+            ..Default::default()
+        };
+        // 24M * 8 bytes = 192 MiB > 128 MiB binding limit → capped to 16,777,216
+        assert_eq!(
+            effective_max_obs_upload(&limits, 24_000_000, 8),
+            128 * 1024 * 1024 / 8
+        );
+        // Already within limits: unchanged
+        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 8), 1_000_000);
+        // Zero obs_size_bytes: treated as 1-byte obs, so limit is max_bytes → requested passes through
+        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 0), 1_000_000);
     }
 }
