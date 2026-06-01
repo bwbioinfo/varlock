@@ -28,7 +28,9 @@ use self::{
 use super::{
     derive_output,
     observation::{self, build_target_frontier_index, build_target_site_map},
-    output, prepare_call_targets,
+    output,
+    pileup::merge_counts,
+    prepare_call_targets,
     types::{SiteCounts, SiteKey},
 };
 
@@ -236,9 +238,16 @@ fn run_covered_gpu_path(
     sample_count: usize,
     matrix_budget: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
+    // Flush when pending buffer holds this many observations to bound peak RAM.
+    // Using max_obs_upload gives one GPU dispatch per flush, balancing overhead.
+    let flush_threshold = kernel.max_obs_upload;
+
     log_verbose(
         ctx,
-        format!("{label} no --targets provided; discovering covered sites for GPU aggregation"),
+        format!(
+            "{label} no --targets: streaming covered-site aggregation flush_threshold={}",
+            flush_threshold
+        ),
     );
 
     let scan_started = Instant::now();
@@ -251,23 +260,43 @@ fn run_covered_gpu_path(
         verbose: ctx.verbose,
     };
     let (scan_rx, scan_handles) = spawn_covered_scan_workers(&prepared.inputs, scan_params);
+
+    let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
+    let mut pending: Vec<CoveredObservation> = Vec::new();
     let mut done_inputs = 0usize;
     let mut skipped_flags = 0usize;
     let mut skipped_rg = 0usize;
-    let mut covered_observations = Vec::new();
+    let mut total_observations = 0u64;
+    let mut flush_count = 0usize;
+
     while done_inputs < prepared.inputs.len() {
         match scan_rx.recv() {
             Ok(CoveredScanEvent::Batch { observations, .. }) => {
-                covered_observations.extend(observations);
+                total_observations += observations.len() as u64;
+                pending.extend(observations);
+                if pending.len() >= flush_threshold {
+                    let batch = flush_covered_batch(
+                        &pending, kernel, runtime, sample_count, args.call.max_depth,
+                        matrix_budget,
+                    )?;
+                    merge_counts(&mut all_counts, batch, args.call.max_depth)?;
+                    pending.clear();
+                    flush_count += 1;
+                    if ctx.verbose > 0 {
+                        eprintln!(
+                            "[{label}] covered flush #{flush_count}: obs_total={total_observations}"
+                        );
+                    }
+                }
             }
             Ok(CoveredScanEvent::Done {
-                skipped_rg: input_skipped_rg,
-                skipped_flags: input_skipped_flags,
+                skipped_rg: r,
+                skipped_flags: f,
                 ..
             }) => {
                 done_inputs += 1;
-                skipped_rg += input_skipped_rg;
-                skipped_flags += input_skipped_flags;
+                skipped_rg += r;
+                skipped_flags += f;
             }
             Err(_) => break,
         }
@@ -277,51 +306,62 @@ fn run_covered_gpu_path(
             .join()
             .map_err(|_| anyhow::anyhow!("GPU scan worker panicked"))??;
     }
+
+    // Final flush for remaining observations.
+    if !pending.is_empty() {
+        let batch = flush_covered_batch(
+            &pending, kernel, runtime, sample_count, args.call.max_depth, matrix_budget,
+        )?;
+        merge_counts(&mut all_counts, batch, args.call.max_depth)?;
+        flush_count += 1;
+    }
+
     log_verbose(
         ctx,
         format!(
-            "{label} stage=scan elapsed={:.2?} observations={} skipped_flags={} skipped_rg={}",
+            "{label} stage=scan+aggregate elapsed={:.2?} observations={} flush_count={} sites={} skipped_flags={} skipped_rg={}",
             scan_started.elapsed(),
-            covered_observations.len(),
+            total_observations,
+            flush_count,
+            all_counts.len(),
             skipped_flags,
             skipped_rg
         ),
     );
 
-    let target_started = Instant::now();
-    let (site_keys, observations) = remap_covered_observations(covered_observations)?;
+    Ok(all_counts)
+}
+
+/// Remap, chunk, and GPU-aggregate one batch of covered observations.
+/// Returns only sites with nonzero counts (sparse).
+fn flush_covered_batch(
+    covered: &[CoveredObservation],
+    kernel: &kernel::GpuAggregateKernel,
+    runtime: &runtime::GpuRuntime,
+    sample_count: usize,
+    max_depth: u32,
+    matrix_budget: usize,
+) -> Result<BTreeMap<SiteKey, SiteCounts>> {
+    let (site_keys, observations) = remap_covered_observations(covered.to_vec())?;
     if site_keys.is_empty() {
         return Ok(BTreeMap::new());
     }
-    log_verbose(
-        ctx,
-        format!(
-            "{label} stage=build_covered_site_map sites={} elapsed={:.2?}",
-            site_keys.len(),
-            target_started.elapsed()
-        ),
-    );
 
     let chunk_plan = build_chunk_plan(site_keys.len(), sample_count, matrix_budget)?;
     let mut chunks = create_chunk_states(&chunk_plan, runtime, sample_count, site_keys.len())?;
-    for observation in observations {
-        let chunk_idx = chunk_for_site(observation.site_idx, chunk_plan.max_sites_per_chunk);
+    for obs in observations {
+        let chunk_idx = chunk_for_site(obs.site_idx, chunk_plan.max_sites_per_chunk);
         let Some(chunk) = chunks.get_mut(chunk_idx) else {
             bail!("covered observation mapped to invalid chunk {}", chunk_idx);
         };
-        chunk.pending_obs.push(observation);
+        chunk.pending_obs.push(obs);
     }
 
-    aggregate_chunks(
-        label,
-        ctx,
-        args,
-        runtime,
-        kernel,
-        &mut chunks,
-        &site_keys,
-        sample_count,
-    )
+    let mut counts = BTreeMap::new();
+    for chunk in &mut chunks {
+        counts.extend(flush_chunk(chunk, kernel, runtime, &site_keys, sample_count, max_depth)?);
+    }
+    Ok(counts)
 }
 
 fn remap_covered_observations(
