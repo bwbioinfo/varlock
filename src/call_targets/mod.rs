@@ -99,14 +99,18 @@ pub(crate) fn prepare_call_targets(
     label: &str,
 ) -> Result<PreparedCallTargets> {
     let stage_started = Instant::now();
+    let reference = args
+        .reference
+        .as_ref()
+        .context("--reference is required for call-targets")?;
     let prepared_reference =
-        crate::fasta_prep::prepare_reference(&args.reference, ctx.verbose, ctx.threads)?;
-    if prepared_reference != args.reference {
+        crate::fasta_prep::prepare_reference(reference, ctx.verbose, ctx.threads)?;
+    if prepared_reference != *reference {
         log_verbose(
             ctx,
             format!(
                 "{label} prepared reference: {} -> {}",
-                args.reference.display(),
+                reference.display(),
                 prepared_reference.display()
             ),
         );
@@ -204,10 +208,7 @@ pub(crate) fn prepare_call_targets(
         Some(path) => log_verbose(ctx, format!("{label} targets: {}", path.display())),
         None => log_verbose(ctx, format!("{label} targets: all covered positions")),
     }
-    log_verbose(
-        ctx,
-        format!("{label} reference: {}", args.reference.display()),
-    );
+    log_verbose(ctx, format!("{label} reference: {}", reference.display()));
 
     Ok(PreparedCallTargets {
         prepared_reference,

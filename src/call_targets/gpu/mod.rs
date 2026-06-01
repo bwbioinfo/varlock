@@ -18,7 +18,8 @@ use self::{
     aggregate::{build_chunk_plan, chunk_for_site, create_chunk_states, flush_chunk},
     kernel::create_kernel,
     runtime::{
-        auto_tuning_for_tier, classify_adapter, effective_matrix_budget, try_initialize_gpu,
+        GpuSelector, auto_tuning_for_tier, classify_adapter, effective_matrix_budget,
+        try_initialize_gpu,
     },
     scan::{
         CoveredObservation, CoveredScanEvent, ScanEvent, ScanWorkerParams,
@@ -38,7 +39,17 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     let label = "call_targets_gpu";
     let run_started = Instant::now();
 
-    let Some(runtime) = try_initialize_gpu(backend_mask(args.gpu_backend), ctx.verbose)? else {
+    let selector = GpuSelector {
+        list: args.gpu_list,
+        index: args.gpu_index,
+        name: args.gpu_name.clone(),
+    };
+
+    let Some(runtime) = try_initialize_gpu(backend_mask(args.gpu_backend), &selector, ctx.verbose)?
+    else {
+        if args.gpu_list {
+            return Ok(());
+        }
         if args.require_gpu {
             bail!("no compatible GPU adapter found");
         }
@@ -80,9 +91,21 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     if ctx.verbose > 0 {
         let auto_budget_mib = auto.stream_matrix_budget_bytes / (1024 * 1024);
         let eff_budget_mib = matrix_budget / (1024 * 1024);
-        let budget_note = if args.matrix_budget_mib.is_some() { " (override)" } else { " (auto)" };
-        let obs_note = if args.max_obs_upload.is_some() { " (override)" } else { " (auto)" };
-        let flush_note = if args.obs_flush_threshold.is_some() { " (override)" } else { "" };
+        let budget_note = if args.matrix_budget_mib.is_some() {
+            " (override)"
+        } else {
+            " (auto)"
+        };
+        let obs_note = if args.max_obs_upload.is_some() {
+            " (override)"
+        } else {
+            " (auto)"
+        };
+        let flush_note = if args.obs_flush_threshold.is_some() {
+            " (override)"
+        } else {
+            ""
+        };
         eprintln!(
             "[{label}] adapter=\"{}\" tier={tier:?} \
              auto: matrix_budget={auto_budget_mib}MiB max_obs_upload={} \
@@ -257,7 +280,6 @@ fn run_covered_gpu_path(
     matrix_budget: usize,
     flush_threshold: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
-
     log_verbose(
         ctx,
         format!(
@@ -292,7 +314,11 @@ fn run_covered_gpu_path(
                 pending.extend(observations);
                 if pending.len() >= flush_threshold {
                     let batch = flush_covered_batch(
-                        &pending, kernel, runtime, sample_count, args.call.max_depth,
+                        &pending,
+                        kernel,
+                        runtime,
+                        sample_count,
+                        args.call.max_depth,
                         matrix_budget,
                     )?;
                     merge_counts(&mut all_counts, batch, args.call.max_depth)?;
@@ -326,7 +352,12 @@ fn run_covered_gpu_path(
     // Final flush for remaining observations.
     if !pending.is_empty() {
         let batch = flush_covered_batch(
-            &pending, kernel, runtime, sample_count, args.call.max_depth, matrix_budget,
+            &pending,
+            kernel,
+            runtime,
+            sample_count,
+            args.call.max_depth,
+            matrix_budget,
         )?;
         merge_counts(&mut all_counts, batch, args.call.max_depth)?;
         flush_count += 1;
@@ -375,7 +406,14 @@ fn flush_covered_batch(
 
     let mut counts = BTreeMap::new();
     for chunk in &mut chunks {
-        counts.extend(flush_chunk(chunk, kernel, runtime, &site_keys, sample_count, max_depth)?);
+        counts.extend(flush_chunk(
+            chunk,
+            kernel,
+            runtime,
+            &site_keys,
+            sample_count,
+            max_depth,
+        )?);
     }
     Ok(counts)
 }

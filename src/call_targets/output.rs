@@ -363,9 +363,13 @@ fn write_vcf_header<W: Write>(
     sample_names: &[String],
     fasta: &FastaIndex,
 ) -> Result<()> {
+    let reference = args
+        .reference
+        .as_ref()
+        .context("--reference is required for call-targets output")?;
     writeln!(writer, "##fileformat=VCFv4.3")?;
     writeln!(writer, "##source=varlock call-targets")?;
-    writeln!(writer, "##reference={}", args.reference.display())?;
+    writeln!(writer, "##reference={}", reference.display())?;
     for (name, length) in ref_names.iter().zip(fasta.reference_lengths(ref_names)?) {
         writeln!(writer, "##contig=<ID={},length={}>", name, length)?;
     }

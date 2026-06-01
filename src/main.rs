@@ -75,6 +75,18 @@ pub struct CallTargetsGpuArgs {
     #[command(flatten)]
     pub call: CallTargetsArgs,
 
+    /// List compatible GPU adapters and exit
+    #[arg(long = "gpu-list")]
+    pub gpu_list: bool,
+
+    /// Select GPU adapter by zero-based index from --gpu-list
+    #[arg(long = "gpu-index", value_name = "INDEX", conflicts_with = "gpu_name")]
+    pub gpu_index: Option<usize>,
+
+    /// Select GPU adapter by case-insensitive name substring
+    #[arg(long = "gpu-name", value_name = "SUBSTRING")]
+    pub gpu_name: Option<String>,
+
     /// Require a GPU instead of falling back to the CPU call-targets path
     #[arg(long = "require-gpu")]
     pub require_gpu: bool,
@@ -116,7 +128,7 @@ pub struct CallTargetsArgs {
         short = 'i',
         long = "input",
         value_name = "PATH",
-        required_unless_present = "bamlist",
+        required_unless_present_any = ["bamlist", "gpu_list"],
         conflicts_with = "bamlist"
     )]
     pub inputs: Vec<PathBuf>,
@@ -125,13 +137,18 @@ pub struct CallTargetsArgs {
     #[arg(
         long = "bamlist",
         value_name = "FILE",
-        required_unless_present = "inputs"
+        required_unless_present_any = ["inputs", "gpu_list"]
     )]
     pub bamlist: Option<PathBuf>,
 
     /// Reference FASTA path (plain or bgzipped; index created automatically if missing)
-    #[arg(short = 'r', long = "reference", value_name = "FASTA")]
-    pub reference: PathBuf,
+    #[arg(
+        short = 'r',
+        long = "reference",
+        value_name = "FASTA",
+        required_unless_present = "gpu_list"
+    )]
+    pub reference: Option<PathBuf>,
 
     /// BED file of target intervals (0-based, half-open); omit to call all covered positions
     #[arg(short = 'T', long = "targets", value_name = "BED")]

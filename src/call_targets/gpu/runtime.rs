@@ -1,12 +1,26 @@
 #![allow(dead_code)]
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::executor::block_on;
 
 pub(crate) struct GpuRuntime {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub(crate) adapter_info: wgpu::AdapterInfo,
+    pub(crate) limits: wgpu::Limits,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GpuSelector {
+    pub(crate) list: bool,
+    pub(crate) index: Option<usize>,
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GpuAdapterSummary {
+    pub(crate) index: usize,
+    pub(crate) info: wgpu::AdapterInfo,
     pub(crate) limits: wgpu::Limits,
 }
 
@@ -27,6 +41,7 @@ pub(crate) struct GpuAutoTuning {
 
 pub(crate) fn try_initialize_gpu(
     backend_mask: wgpu::Backends,
+    selector: &GpuSelector,
     verbose: u8,
 ) -> Result<Option<GpuRuntime>> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -34,13 +49,29 @@ pub(crate) fn try_initialize_gpu(
         ..Default::default()
     });
 
-    let adapter = match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: None,
-    })) {
-        Ok(adapter) => adapter,
-        Err(_) => return Ok(None),
+    if selector.list {
+        let summaries = enumerate_adapter_summaries(&instance, backend_mask);
+        print_adapter_summaries(&summaries);
+        return Ok(None);
+    }
+
+    let adapter = if selector.index.is_some() || selector.name.is_some() {
+        let adapters = block_on(instance.enumerate_adapters(backend_mask));
+        let summaries = adapter_summaries(&adapters);
+        let selected_idx = select_adapter_index(&summaries, selector)?;
+        adapters
+            .into_iter()
+            .nth(selected_idx)
+            .with_context(|| format!("selected GPU adapter index {selected_idx} disappeared"))?
+    } else {
+        match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })) {
+            Ok(adapter) => adapter,
+            Err(_) => return Ok(None),
+        }
     };
 
     let adapter_info = adapter.get_info();
@@ -66,6 +97,91 @@ pub(crate) fn try_initialize_gpu(
         adapter_info,
         limits,
     }))
+}
+
+fn enumerate_adapter_summaries(
+    instance: &wgpu::Instance,
+    backend_mask: wgpu::Backends,
+) -> Vec<GpuAdapterSummary> {
+    let adapters = block_on(instance.enumerate_adapters(backend_mask));
+    adapter_summaries(&adapters)
+}
+
+fn adapter_summaries(adapters: &[wgpu::Adapter]) -> Vec<GpuAdapterSummary> {
+    adapters
+        .iter()
+        .enumerate()
+        .map(|(index, adapter)| GpuAdapterSummary {
+            index,
+            info: adapter.get_info(),
+            limits: adapter.limits(),
+        })
+        .collect()
+}
+
+fn print_adapter_summaries(summaries: &[GpuAdapterSummary]) {
+    if summaries.is_empty() {
+        println!("No compatible GPU adapters found");
+        return;
+    }
+
+    for summary in summaries {
+        let info = &summary.info;
+        let limits = &summary.limits;
+        println!(
+            "[{}] {} ({:?}, backend={:?}, vendor=0x{:04x}, device=0x{:04x}, pci_bus_id={})",
+            summary.index,
+            info.name,
+            info.device_type,
+            info.backend,
+            info.vendor,
+            info.device,
+            empty_as_dash(&info.device_pci_bus_id)
+        );
+        println!(
+            "    driver={} {} max_storage_binding={} max_buffer_size={} max_workgroups_x={}",
+            empty_as_dash(&info.driver),
+            empty_as_dash(&info.driver_info),
+            limits.max_storage_buffer_binding_size,
+            limits.max_buffer_size,
+            limits.max_compute_workgroups_per_dimension
+        );
+    }
+}
+
+fn empty_as_dash(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
+}
+
+fn select_adapter_index(summaries: &[GpuAdapterSummary], selector: &GpuSelector) -> Result<usize> {
+    if summaries.is_empty() {
+        bail!("no compatible GPU adapters found");
+    }
+    if selector.index.is_some() && selector.name.is_some() {
+        bail!("--gpu-index and --gpu-name cannot be used together");
+    }
+    if let Some(index) = selector.index {
+        if summaries.iter().any(|summary| summary.index == index) {
+            return Ok(index);
+        }
+        bail!(
+            "GPU adapter index {} is out of range; {} adapter(s) available",
+            index,
+            summaries.len()
+        );
+    }
+    if let Some(name) = &selector.name {
+        let needle = name.to_ascii_lowercase();
+        if let Some(summary) = summaries
+            .iter()
+            .find(|summary| summary.info.name.to_ascii_lowercase().contains(&needle))
+        {
+            return Ok(summary.index);
+        }
+        bail!("no GPU adapter name contains {:?}", name);
+    }
+
+    bail!("no GPU adapter selector was provided")
 }
 
 pub(crate) fn classify_adapter(info: &wgpu::AdapterInfo) -> GpuTier {
@@ -154,8 +270,8 @@ pub(crate) fn effective_max_obs_upload(
     obs_size_bytes: usize,
     workgroup_size: usize,
 ) -> usize {
-    let max_from_binding = (limits.max_storage_buffer_binding_size as usize)
-        .min(limits.max_buffer_size as usize);
+    let max_from_binding =
+        (limits.max_storage_buffer_binding_size as usize).min(limits.max_buffer_size as usize);
     let max_from_workgroups =
         (limits.max_compute_workgroups_per_dimension as usize).saturating_mul(workgroup_size);
     requested
@@ -181,6 +297,14 @@ mod tests {
             subgroup_min_size: 0,
             subgroup_max_size: 0,
             transient_saves_memory: false,
+        }
+    }
+
+    fn summary(index: usize, name: &str) -> GpuAdapterSummary {
+        GpuAdapterSummary {
+            index,
+            info: adapter_info(name, wgpu::DeviceType::DiscreteGpu),
+            limits: wgpu::Limits::default(),
         }
     }
 
@@ -270,11 +394,63 @@ mod tests {
             65535 * 256
         );
         // Already within limits: unchanged
-        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 8, 256), 1_000_000);
+        assert_eq!(
+            effective_max_obs_upload(&limits, 1_000_000, 8, 256),
+            1_000_000
+        );
         // Zero obs_size_bytes: treated as 1-byte obs → workgroup limit dominates
         assert_eq!(
             effective_max_obs_upload(&limits, usize::MAX, 0, 256),
             65535 * 256
         );
+    }
+
+    #[test]
+    fn select_adapter_index_uses_explicit_index() -> Result<()> {
+        let summaries = vec![summary(0, "GPU 0"), summary(1, "GPU 1")];
+        let selector = GpuSelector {
+            index: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(select_adapter_index(&summaries, &selector)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn select_adapter_index_uses_case_insensitive_name_match() -> Result<()> {
+        let summaries = vec![summary(0, "Intel UHD"), summary(1, "NVIDIA H100 PCIe")];
+        let selector = GpuSelector {
+            name: Some("h100".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(select_adapter_index(&summaries, &selector)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn select_adapter_index_rejects_conflicting_selectors() {
+        let summaries = vec![summary(0, "GPU 0")];
+        let selector = GpuSelector {
+            index: Some(0),
+            name: Some("gpu".to_string()),
+            ..Default::default()
+        };
+
+        let err = select_adapter_index(&summaries, &selector).unwrap_err();
+        assert!(err.to_string().contains("cannot be used together"));
+    }
+
+    #[test]
+    fn select_adapter_index_rejects_out_of_range_index() {
+        let summaries = vec![summary(0, "GPU 0")];
+        let selector = GpuSelector {
+            index: Some(2),
+            ..Default::default()
+        };
+
+        let err = select_adapter_index(&summaries, &selector).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 }
