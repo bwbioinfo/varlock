@@ -65,6 +65,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         &runtime.limits,
         tuning.max_obs_upload,
         size_of::<observation::Observation>(),
+        kernel::WORKGROUP_SIZE as usize,
     );
     log_verbose(
         ctx,

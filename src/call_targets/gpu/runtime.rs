@@ -144,17 +144,23 @@ pub(crate) fn effective_matrix_budget(limits: &wgpu::Limits, requested_budget: u
         .max(1)
 }
 
-/// Cap max_obs_upload so the obs buffer never exceeds GPU binding or buffer-size limits.
-/// obs_size_bytes is size_of::<Observation>() — passed in to avoid importing that type here.
+/// Cap max_obs_upload so the obs buffer never exceeds GPU binding/buffer-size limits and
+/// a single dispatch_workgroups call never exceeds max_compute_workgroups_per_dimension.
+/// obs_size_bytes  = size_of::<Observation>() — passed in to avoid importing that type here.
+/// workgroup_size  = WORKGROUP_SIZE from kernel.rs.
 pub(crate) fn effective_max_obs_upload(
     limits: &wgpu::Limits,
     requested: usize,
     obs_size_bytes: usize,
+    workgroup_size: usize,
 ) -> usize {
-    let max_bytes = (limits.max_storage_buffer_binding_size as usize)
+    let max_from_binding = (limits.max_storage_buffer_binding_size as usize)
         .min(limits.max_buffer_size as usize);
+    let max_from_workgroups =
+        (limits.max_compute_workgroups_per_dimension as usize).saturating_mul(workgroup_size);
     requested
-        .min(max_bytes / obs_size_bytes.max(1))
+        .min(max_from_binding / obs_size_bytes.max(1))
+        .min(max_from_workgroups)
         .max(1)
 }
 
@@ -254,16 +260,21 @@ mod tests {
         let limits = wgpu::Limits {
             max_storage_buffer_binding_size: 128 * 1024 * 1024, // 128 MiB
             max_buffer_size: 256 * 1024 * 1024,
+            max_compute_workgroups_per_dimension: 65535,
             ..Default::default()
         };
-        // 24M * 8 bytes = 192 MiB > 128 MiB binding limit → capped to 16,777,216
+        // 24M * 8 = 192 MiB > 128 MiB binding → capped to 16,777,216
+        // but 16,777,216 / 256 = 65536 > 65535 workgroup limit → further capped to 65535*256 = 16,776,960
         assert_eq!(
-            effective_max_obs_upload(&limits, 24_000_000, 8),
-            128 * 1024 * 1024 / 8
+            effective_max_obs_upload(&limits, 24_000_000, 8, 256),
+            65535 * 256
         );
         // Already within limits: unchanged
-        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 8), 1_000_000);
-        // Zero obs_size_bytes: treated as 1-byte obs, so limit is max_bytes → requested passes through
-        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 0), 1_000_000);
+        assert_eq!(effective_max_obs_upload(&limits, 1_000_000, 8, 256), 1_000_000);
+        // Zero obs_size_bytes: treated as 1-byte obs → workgroup limit dominates
+        assert_eq!(
+            effective_max_obs_upload(&limits, usize::MAX, 0, 256),
+            65535 * 256
+        );
     }
 }

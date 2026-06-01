@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use super::runtime::GpuRuntime;
 use crate::call_targets::observation::Observation;
 
-const WORKGROUP_SIZE: u32 = 256;
+pub(crate) const WORKGROUP_SIZE: u32 = 256;
 
 pub(crate) const AGGREGATE_SHADER: &str = r#"
 struct Observation {
