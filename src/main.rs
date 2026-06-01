@@ -51,6 +51,35 @@ struct Cli {
 enum Command {
     /// Call simple SNVs from BAMs against target regions (bgzipped VCF + index)
     CallTargets(CallTargetsArgs),
+
+    /// Call simple SNVs with GPU-accelerated aggregation (requires --features wgpu)
+    #[cfg(feature = "wgpu")]
+    CallTargetsGpu(CallTargetsGpuArgs),
+}
+
+#[cfg(feature = "wgpu")]
+#[derive(Args, Debug, Clone)]
+pub struct CallTargetsGpuArgs {
+    #[command(flatten)]
+    pub call: CallTargetsArgs,
+
+    /// Require a GPU instead of falling back to the CPU call-targets path
+    #[arg(long = "require-gpu")]
+    pub require_gpu: bool,
+
+    /// wgpu backend selection
+    #[arg(long = "gpu-backend", value_enum, default_value_t = GpuBackend::All)]
+    pub gpu_backend: GpuBackend,
+}
+
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum GpuBackend {
+    All,
+    Vulkan,
+    Metal,
+    Dx12,
+    Gl,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -157,6 +186,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::CallTargets(args) => call_targets::run(args, &ctx),
+        #[cfg(feature = "wgpu")]
+        Command::CallTargetsGpu(args) => call_targets::gpu::run(args, &ctx),
     }
 }
 

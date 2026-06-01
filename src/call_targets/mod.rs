@@ -1,3 +1,6 @@
+#[cfg(feature = "wgpu")]
+pub(crate) mod gpu;
+mod observation;
 mod output;
 mod pileup;
 mod reference;

@@ -153,7 +153,7 @@ pub(crate) fn merge_counts(
     Ok(())
 }
 
-fn merge_sample_counts_with_cap(dst: &mut [u32; 4], src: [u32; 4], max_depth: u32) {
+pub(crate) fn merge_sample_counts_with_cap(dst: &mut [u32; 4], src: [u32; 4], max_depth: u32) {
     if max_depth == 0 {
         return;
     }
@@ -204,7 +204,7 @@ fn merge_sample_counts_with_cap(dst: &mut [u32; 4], src: [u32; 4], max_depth: u3
     }
 }
 
-fn should_skip_record(record: &bam::Record) -> bool {
+pub(crate) fn should_skip_record(record: &bam::Record) -> bool {
     let flags = record.flags();
     flags.is_unmapped()
         || flags.is_secondary()
@@ -213,7 +213,7 @@ fn should_skip_record(record: &bam::Record) -> bool {
         || flags.is_duplicate()
 }
 
-fn record_sample<'a>(
+pub(crate) fn record_sample<'a>(
     record: &bam::Record,
     rg_to_sm: &'a HashMap<String, String>,
 ) -> Result<Option<&'a str>> {

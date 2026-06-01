@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Variant calling CLI from BAM alignments"
 
+[features]
+default = []
+wgpu = ["dep:bytemuck", "dep:futures", "dep:wgpu"]
+
 [dependencies]
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
 clap = { version = "4.5.4", features = ["derive"] }
 noodles-bam = "0.86"
 noodles-bgzf = "0.46"
@@ -14,7 +19,9 @@ noodles-tabix = "0.60"
 noodles-csi = "0.54"
 anyhow = "1.0.93"
 flate2 = "1.1.5"
+futures = { version = "0.3.31", optional = true }
 libc = "0.2"
+wgpu = { version = "28", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

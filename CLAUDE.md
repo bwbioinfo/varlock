@@ -55,6 +55,7 @@ bd close <id>         # Complete work
 ```bash
 cargo build                        # debug build
 cargo build --release              # release build
+cargo build --features wgpu        # include experimental GPU calling modules
 cargo check                        # fast type-check without linking
 cargo clippy                       # lint
 cargo test                         # run all tests
