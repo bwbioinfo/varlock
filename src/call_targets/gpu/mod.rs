@@ -41,7 +41,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
 
     let selector = GpuSelector {
         list: args.gpu_list,
-        index: args.gpu_index,
+        indices: args.gpu_indices.clone(),
         name: args.gpu_name.clone(),
     };
 

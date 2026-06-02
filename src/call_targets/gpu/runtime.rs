@@ -13,7 +13,7 @@ pub(crate) struct GpuRuntime {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GpuSelector {
     pub(crate) list: bool,
-    pub(crate) index: Option<usize>,
+    pub(crate) indices: Vec<usize>,
     pub(crate) name: Option<String>,
 }
 
@@ -55,10 +55,14 @@ pub(crate) fn try_initialize_gpu(
         return Ok(None);
     }
 
-    let adapter = if selector.index.is_some() || selector.name.is_some() {
+    let adapter = if !selector.indices.is_empty() || selector.name.is_some() {
         let adapters = block_on(instance.enumerate_adapters(backend_mask));
         let summaries = adapter_summaries(&adapters);
-        let selected_idx = select_adapter_index(&summaries, selector)?;
+        let selected_indices = select_adapter_indices(&summaries, selector)?;
+        if selected_indices.len() > 1 {
+            bail!("multiple GPU adapters were selected, but multi-GPU execution is not wired yet");
+        }
+        let selected_idx = selected_indices[0];
         adapters
             .into_iter()
             .nth(selected_idx)
@@ -153,22 +157,32 @@ fn empty_as_dash(value: &str) -> &str {
     if value.is_empty() { "-" } else { value }
 }
 
-fn select_adapter_index(summaries: &[GpuAdapterSummary], selector: &GpuSelector) -> Result<usize> {
+fn select_adapter_indices(
+    summaries: &[GpuAdapterSummary],
+    selector: &GpuSelector,
+) -> Result<Vec<usize>> {
     if summaries.is_empty() {
         bail!("no compatible GPU adapters found");
     }
-    if selector.index.is_some() && selector.name.is_some() {
+    if !selector.indices.is_empty() && selector.name.is_some() {
         bail!("--gpu-index and --gpu-name cannot be used together");
     }
-    if let Some(index) = selector.index {
-        if summaries.iter().any(|summary| summary.index == index) {
-            return Ok(index);
+    if !selector.indices.is_empty() {
+        let mut selected = Vec::with_capacity(selector.indices.len());
+        for &index in &selector.indices {
+            if !summaries.iter().any(|summary| summary.index == index) {
+                bail!(
+                    "GPU adapter index {} is out of range; {} adapter(s) available",
+                    index,
+                    summaries.len()
+                );
+            }
+            if selected.contains(&index) {
+                bail!("GPU adapter index {} was selected more than once", index);
+            }
+            selected.push(index);
         }
-        bail!(
-            "GPU adapter index {} is out of range; {} adapter(s) available",
-            index,
-            summaries.len()
-        );
+        return Ok(selected);
     }
     if let Some(name) = &selector.name {
         let needle = name.to_ascii_lowercase();
@@ -176,7 +190,7 @@ fn select_adapter_index(summaries: &[GpuAdapterSummary], selector: &GpuSelector)
             .iter()
             .find(|summary| summary.info.name.to_ascii_lowercase().contains(&needle))
         {
-            return Ok(summary.index);
+            return Ok(vec![summary.index]);
         }
         bail!("no GPU adapter name contains {:?}", name);
     }
@@ -406,51 +420,67 @@ mod tests {
     }
 
     #[test]
-    fn select_adapter_index_uses_explicit_index() -> Result<()> {
-        let summaries = vec![summary(0, "GPU 0"), summary(1, "GPU 1")];
+    fn select_adapter_indices_use_explicit_indices() -> Result<()> {
+        let summaries = vec![
+            summary(0, "GPU 0"),
+            summary(1, "GPU 1"),
+            summary(2, "GPU 2"),
+        ];
         let selector = GpuSelector {
-            index: Some(1),
+            indices: vec![2, 0],
             ..Default::default()
         };
 
-        assert_eq!(select_adapter_index(&summaries, &selector)?, 1);
+        assert_eq!(select_adapter_indices(&summaries, &selector)?, vec![2, 0]);
         Ok(())
     }
 
     #[test]
-    fn select_adapter_index_uses_case_insensitive_name_match() -> Result<()> {
+    fn select_adapter_indices_use_case_insensitive_name_match() -> Result<()> {
         let summaries = vec![summary(0, "Intel UHD"), summary(1, "NVIDIA H100 PCIe")];
         let selector = GpuSelector {
             name: Some("h100".to_string()),
             ..Default::default()
         };
 
-        assert_eq!(select_adapter_index(&summaries, &selector)?, 1);
+        assert_eq!(select_adapter_indices(&summaries, &selector)?, vec![1]);
         Ok(())
     }
 
     #[test]
-    fn select_adapter_index_rejects_conflicting_selectors() {
+    fn select_adapter_indices_reject_conflicting_selectors() {
         let summaries = vec![summary(0, "GPU 0")];
         let selector = GpuSelector {
-            index: Some(0),
+            indices: vec![0],
             name: Some("gpu".to_string()),
             ..Default::default()
         };
 
-        let err = select_adapter_index(&summaries, &selector).unwrap_err();
+        let err = select_adapter_indices(&summaries, &selector).unwrap_err();
         assert!(err.to_string().contains("cannot be used together"));
     }
 
     #[test]
-    fn select_adapter_index_rejects_out_of_range_index() {
+    fn select_adapter_indices_reject_out_of_range_index() {
         let summaries = vec![summary(0, "GPU 0")];
         let selector = GpuSelector {
-            index: Some(2),
+            indices: vec![2],
             ..Default::default()
         };
 
-        let err = select_adapter_index(&summaries, &selector).unwrap_err();
+        let err = select_adapter_indices(&summaries, &selector).unwrap_err();
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn select_adapter_indices_reject_duplicates() {
+        let summaries = vec![summary(0, "GPU 0"), summary(1, "GPU 1")];
+        let selector = GpuSelector {
+            indices: vec![1, 1],
+            ..Default::default()
+        };
+
+        let err = select_adapter_indices(&summaries, &selector).unwrap_err();
+        assert!(err.to_string().contains("more than once"));
     }
 }

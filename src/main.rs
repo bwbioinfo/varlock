@@ -79,9 +79,9 @@ pub struct CallTargetsGpuArgs {
     #[arg(long = "gpu-list")]
     pub gpu_list: bool,
 
-    /// Select GPU adapter by zero-based index from --gpu-list
+    /// Select GPU adapter by zero-based index from --gpu-list; repeat for future multi-GPU use
     #[arg(long = "gpu-index", value_name = "INDEX", conflicts_with = "gpu_name")]
-    pub gpu_index: Option<usize>,
+    pub gpu_indices: Vec<usize>,
 
     /// Select GPU adapter by case-insensitive name substring
     #[arg(long = "gpu-name", value_name = "SUBSTRING")]
