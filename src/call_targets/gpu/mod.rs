@@ -19,7 +19,7 @@ use self::{
     kernel::create_kernel,
     runtime::{
         GpuSelector, auto_tuning_for_tier, classify_adapter, effective_matrix_budget,
-        try_initialize_gpu,
+        try_initialize_gpus,
     },
     scan::{
         CoveredObservation, CoveredScanEvent, ScanEvent, ScanWorkerParams,
@@ -45,8 +45,8 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         name: args.gpu_name.clone(),
     };
 
-    let Some(runtime) = try_initialize_gpu(backend_mask(args.gpu_backend), &selector, ctx.verbose)?
-    else {
+    let runtimes = try_initialize_gpus(backend_mask(args.gpu_backend), &selector, ctx.verbose)?;
+    if runtimes.is_empty() {
         if args.gpu_list {
             return Ok(());
         }
@@ -60,6 +60,11 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         return call_targets::run(args.call, ctx);
     };
 
+    let gpu_workers = build_gpu_worker_runtimes(&args, ctx, runtimes)?;
+    let primary = gpu_workers
+        .first()
+        .context("GPU runtime set was unexpectedly empty")?;
+
     let prepared = prepare_call_targets(&args.call, ctx, label)?;
     let sample_count = prepared.sample_names.len();
     let output = args
@@ -69,24 +74,13 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         .unwrap_or_else(|| derive_output(&prepared.inputs, args.call.bamlist.as_deref()));
     log_verbose(ctx, format!("{label} output: {}", output.display()));
 
-    let tier = classify_adapter(&runtime.adapter_info);
+    let tier = primary.tier;
+    let runtime = &primary.runtime;
+    let kernel = &primary.kernel;
+    let matrix_budget = primary.matrix_budget;
+    let max_obs_upload = primary.max_obs_upload;
+    let flush_threshold = primary.flush_threshold;
     let auto = auto_tuning_for_tier(tier);
-
-    // Apply user overrides on top of tier defaults, then clamp to hardware limits.
-    let requested_budget = args
-        .matrix_budget_mib
-        .map(|mib| mib.saturating_mul(1024 * 1024))
-        .unwrap_or(auto.stream_matrix_budget_bytes);
-    let requested_obs = args.max_obs_upload.unwrap_or(auto.max_obs_upload);
-
-    let matrix_budget = effective_matrix_budget(&runtime.limits, requested_budget);
-    let max_obs_upload = runtime::effective_max_obs_upload(
-        &runtime.limits,
-        requested_obs,
-        size_of::<observation::Observation>(),
-        kernel::WORKGROUP_SIZE as usize,
-    );
-    let flush_threshold = args.obs_flush_threshold.unwrap_or(max_obs_upload);
 
     if ctx.verbose > 0 {
         let auto_budget_mib = auto.stream_matrix_budget_bytes / (1024 * 1024);
@@ -115,8 +109,6 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
             runtime.adapter_info.name, auto.max_obs_upload,
         );
     }
-
-    let kernel = create_kernel(&runtime, max_obs_upload)?;
 
     let all_counts = if args.call.targets.is_some() {
         run_static_target_gpu_path(
@@ -159,6 +151,60 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         format!("{label} stage=done elapsed={:.2?}", run_started.elapsed()),
     );
     Ok(())
+}
+
+struct GpuWorkerRuntime {
+    runtime: runtime::GpuRuntime,
+    kernel: kernel::GpuAggregateKernel,
+    tier: runtime::GpuTier,
+    matrix_budget: usize,
+    max_obs_upload: usize,
+    flush_threshold: usize,
+}
+
+fn build_gpu_worker_runtimes(
+    args: &CallTargetsGpuArgs,
+    ctx: &ExecutionContext,
+    runtimes: Vec<runtime::GpuRuntime>,
+) -> Result<Vec<GpuWorkerRuntime>> {
+    let mut workers = Vec::with_capacity(runtimes.len());
+    for runtime in runtimes {
+        let tier = classify_adapter(&runtime.adapter_info);
+        let auto = auto_tuning_for_tier(tier);
+        let requested_budget = args
+            .matrix_budget_mib
+            .map(|mib| mib.saturating_mul(1024 * 1024))
+            .unwrap_or(auto.stream_matrix_budget_bytes);
+        let requested_obs = args.max_obs_upload.unwrap_or(auto.max_obs_upload);
+
+        let matrix_budget = effective_matrix_budget(&runtime.limits, requested_budget);
+        let max_obs_upload = runtime::effective_max_obs_upload(
+            &runtime.limits,
+            requested_obs,
+            size_of::<observation::Observation>(),
+            kernel::WORKGROUP_SIZE as usize,
+        );
+        let flush_threshold = args.obs_flush_threshold.unwrap_or(max_obs_upload);
+        let kernel = create_kernel(&runtime, max_obs_upload)?;
+
+        if ctx.verbose > 0 {
+            eprintln!(
+                "[call_targets_gpu] prepared adapter=\"{}\" tier={tier:?} matrix_budget={} max_obs_upload={} flush_threshold={}",
+                runtime.adapter_info.name, matrix_budget, max_obs_upload, flush_threshold
+            );
+        }
+
+        workers.push(GpuWorkerRuntime {
+            runtime,
+            kernel,
+            tier,
+            matrix_budget,
+            max_obs_upload,
+            flush_threshold,
+        });
+    }
+
+    Ok(workers)
 }
 
 fn run_static_target_gpu_path(

@@ -39,11 +39,11 @@ pub(crate) struct GpuAutoTuning {
     pub(crate) ready_batch_obs_limit: usize,
 }
 
-pub(crate) fn try_initialize_gpu(
+pub(crate) fn try_initialize_gpus(
     backend_mask: wgpu::Backends,
     selector: &GpuSelector,
     verbose: u8,
-) -> Result<Option<GpuRuntime>> {
+) -> Result<Vec<GpuRuntime>> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: backend_mask,
         ..Default::default()
@@ -52,32 +52,39 @@ pub(crate) fn try_initialize_gpu(
     if selector.list {
         let summaries = enumerate_adapter_summaries(&instance, backend_mask);
         print_adapter_summaries(&summaries);
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    let adapter = if !selector.indices.is_empty() || selector.name.is_some() {
+    let adapters = if !selector.indices.is_empty() || selector.name.is_some() {
         let adapters = block_on(instance.enumerate_adapters(backend_mask));
         let summaries = adapter_summaries(&adapters);
         let selected_indices = select_adapter_indices(&summaries, selector)?;
-        if selected_indices.len() > 1 {
-            bail!("multiple GPU adapters were selected, but multi-GPU execution is not wired yet");
-        }
-        let selected_idx = selected_indices[0];
-        adapters
+        selected_indices
             .into_iter()
-            .nth(selected_idx)
-            .with_context(|| format!("selected GPU adapter index {selected_idx} disappeared"))?
+            .map(|selected_idx| {
+                adapters.get(selected_idx).cloned().with_context(|| {
+                    format!("selected GPU adapter index {selected_idx} disappeared")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
     } else {
         match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
         })) {
-            Ok(adapter) => adapter,
-            Err(_) => return Ok(None),
+            Ok(adapter) => vec![adapter],
+            Err(_) => return Ok(Vec::new()),
         }
     };
 
+    adapters
+        .into_iter()
+        .map(|adapter| initialize_gpu_runtime(adapter, verbose))
+        .collect()
+}
+
+fn initialize_gpu_runtime(adapter: wgpu::Adapter, verbose: u8) -> Result<GpuRuntime> {
     let adapter_info = adapter.get_info();
     if verbose > 0 {
         eprintln!(
@@ -95,12 +102,12 @@ pub(crate) fn try_initialize_gpu(
     .context("failed to create wgpu device")?;
     let limits = device.limits();
 
-    Ok(Some(GpuRuntime {
+    Ok(GpuRuntime {
         device,
         queue,
         adapter_info,
         limits,
-    }))
+    })
 }
 
 fn enumerate_adapter_summaries(
