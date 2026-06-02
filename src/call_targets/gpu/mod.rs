@@ -32,7 +32,7 @@ use super::{
     derive_output,
     observation::{self, build_target_frontier_index, build_target_site_map},
     output,
-    pileup::merge_counts,
+    pileup::{cap_counts, merge_counts_uncapped},
     prepare_call_targets,
     types::{SiteCounts, SiteKey},
 };
@@ -392,10 +392,10 @@ fn run_covered_gpu_path(
                         kernel,
                         runtime,
                         sample_count,
-                        args.call.max_depth,
+                        u32::MAX,
                         matrix_budget,
                     )?;
-                    merge_counts(&mut all_counts, batch, args.call.max_depth)?;
+                    merge_counts_uncapped(&mut all_counts, batch)?;
                     pending.clear();
                     flush_count += 1;
                     if ctx.verbose > 0 {
@@ -430,12 +430,13 @@ fn run_covered_gpu_path(
             kernel,
             runtime,
             sample_count,
-            args.call.max_depth,
+            u32::MAX,
             matrix_budget,
         )?;
-        merge_counts(&mut all_counts, batch, args.call.max_depth)?;
+        merge_counts_uncapped(&mut all_counts, batch)?;
         flush_count += 1;
     }
+    cap_counts(&mut all_counts, args.call.max_depth);
 
     log_verbose(
         ctx,

@@ -153,6 +153,41 @@ pub(crate) fn merge_counts(
     Ok(())
 }
 
+pub(crate) fn merge_counts_uncapped(
+    dst: &mut BTreeMap<SiteKey, SiteCounts>,
+    src: BTreeMap<SiteKey, SiteCounts>,
+) -> Result<()> {
+    for (key, site_counts) in src {
+        let sample_count = site_counts.per_sample.len();
+        let dst_entry = dst.entry(key).or_insert_with(|| SiteCounts {
+            per_sample: vec![[0; 4]; sample_count],
+        });
+
+        if dst_entry.per_sample.len() != sample_count {
+            bail!("inconsistent sample vector length while merging counts");
+        }
+
+        for (dst_sample, src_sample) in dst_entry.per_sample.iter_mut().zip(site_counts.per_sample)
+        {
+            for i in 0..4 {
+                dst_sample[i] = dst_sample[i].saturating_add(src_sample[i]);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn cap_counts(counts: &mut BTreeMap<SiteKey, SiteCounts>, max_depth: u32) {
+    for site_counts in counts.values_mut() {
+        for sample_counts in &mut site_counts.per_sample {
+            let raw = *sample_counts;
+            *sample_counts = [0; 4];
+            merge_sample_counts_with_cap(sample_counts, raw, max_depth);
+        }
+    }
+}
+
 pub(crate) fn merge_sample_counts_with_cap(dst: &mut [u32; 4], src: [u32; 4], max_depth: u32) {
     if max_depth == 0 {
         return;
@@ -315,7 +350,10 @@ fn pileup_record(
 mod tests {
     use super::super::samples::DEFAULT_SAMPLE_NAME;
     use super::super::types::{SiteCounts, SiteKey};
-    use super::{merge_counts, merge_sample_counts_with_cap, record_sample};
+    use super::{
+        cap_counts, merge_counts, merge_counts_uncapped, merge_sample_counts_with_cap,
+        record_sample,
+    };
     use anyhow::Result;
     use noodles_bam as bam;
     use std::collections::{BTreeMap, HashMap};
@@ -413,6 +451,30 @@ mod tests {
         second.insert(site(0, 1), counts(vec![[0, 0, 1, 0]])); // 1 sample vs 2
         let err = merge_counts(&mut all, second, 1000).unwrap_err();
         assert!(err.to_string().contains("inconsistent sample vector"));
+        Ok(())
+    }
+
+    #[test]
+    fn uncapped_merge_then_cap_matches_single_cap() -> Result<()> {
+        let mut split: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
+
+        let mut first = BTreeMap::new();
+        first.insert(site(0, 1), counts(vec![[0, 5, 1, 0]]));
+        merge_counts_uncapped(&mut split, first)?;
+
+        let mut second = BTreeMap::new();
+        second.insert(site(0, 1), counts(vec![[0, 5, 3, 0]]));
+        merge_counts_uncapped(&mut split, second)?;
+        cap_counts(&mut split, 6);
+
+        let mut single: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
+        single.insert(site(0, 1), counts(vec![[0, 10, 4, 0]]));
+        cap_counts(&mut single, 6);
+
+        assert_eq!(
+            split[&site(0, 1)].per_sample[0],
+            single[&site(0, 1)].per_sample[0]
+        );
         Ok(())
     }
 
