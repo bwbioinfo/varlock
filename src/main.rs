@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 
+mod annotate;
 mod call_targets;
 mod fasta_prep;
 
@@ -67,6 +68,32 @@ enum Command {
     /// Call simple SNVs with GPU-accelerated aggregation (requires --features wgpu)
     #[cfg(feature = "wgpu")]
     CallTargetsGpu(CallTargetsGpuArgs),
+
+    /// Annotate VCF records from exact-key VCF-like databases
+    Annotate(AnnotateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AnnotateArgs {
+    /// Input VCF path (plain or .gz)
+    #[arg(short = 'i', long = "input", value_name = "VCF")]
+    pub input: PathBuf,
+
+    /// Annotation database as NAME=PATH; repeat for multiple databases
+    #[arg(long = "database", value_name = "NAME=VCF", required = true)]
+    pub databases: Vec<String>,
+
+    /// Annotation mapping as NAME:SRC=DEST[,SRC=DEST]; repeat for multiple mappings
+    #[arg(
+        long = "annotation",
+        value_name = "NAME:SRC=DEST[,SRC=DEST]",
+        required = true
+    )]
+    pub annotations: Vec<String>,
+
+    /// Output VCF.gz path
+    #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
+    pub output: PathBuf,
 }
 
 #[cfg(feature = "wgpu")]
@@ -222,6 +249,7 @@ fn main() -> Result<()> {
         Command::CallTargets(args) => call_targets::run(args, &ctx),
         #[cfg(feature = "wgpu")]
         Command::CallTargetsGpu(args) => call_targets::gpu::run(args, &ctx),
+        Command::Annotate(args) => annotate::run(args, &ctx),
     }
 }
 

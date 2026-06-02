@@ -153,6 +153,7 @@ pub(crate) fn merge_counts(
     Ok(())
 }
 
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 pub(crate) fn merge_counts_uncapped(
     dst: &mut BTreeMap<SiteKey, SiteCounts>,
     src: BTreeMap<SiteKey, SiteCounts>,
@@ -178,6 +179,7 @@ pub(crate) fn merge_counts_uncapped(
     Ok(())
 }
 
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 pub(crate) fn cap_counts(counts: &mut BTreeMap<SiteKey, SiteCounts>, max_depth: u32) {
     for site_counts in counts.values_mut() {
         for sample_counts in &mut site_counts.per_sample {

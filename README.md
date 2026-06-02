@@ -16,6 +16,7 @@ Current subcommands:
 - `call-targets` - CPU SNV calling from BAMs.
 - `call-targets-gpu` - GPU-accelerated count aggregation, available when built
   with the `wgpu` feature.
+- `annotate` - exact-key VCF annotation from VCF-like databases.
 
 ## Build
 
@@ -36,6 +37,7 @@ During development:
 ```bash
 cargo run -- call-targets --help
 cargo run --features wgpu -- call-targets-gpu --help
+cargo run -- annotate --help
 ```
 
 ## Inputs
@@ -300,6 +302,37 @@ varlock --log-file run.log call-targets \
   --targets targets.bed
 ```
 
+## Variant Annotation
+
+`annotate` adds INFO annotations to an input VCF using exact
+`CHROM, POS, REF, ALT` matches from one or more VCF-like databases. The initial
+implementation loads database records into memory and supports single-ALT
+records. Multi-ALT database and input records are left unannotated in this first
+mode.
+
+```bash
+varlock annotate \
+  --input calls.vcf.gz \
+  --database gnomad=gnomad.sites.vcf.gz \
+  --annotation gnomad:AF=gnomAD_AF,AC=gnomAD_AC \
+  --output calls.annotated.vcf.gz
+```
+
+Multiple databases can be supplied by repeating `--database` and `--annotation`:
+
+```bash
+varlock annotate \
+  --input calls.vcf.gz \
+  --database common=dbs/common.vcf.gz \
+  --database cohort=dbs/cohort_freqs.vcf.gz \
+  --annotation common:AF=common_AF \
+  --annotation cohort:AF=cohort_AF \
+  --output calls.annotated.vcf.gz
+```
+
+Annotation output is bgzipped VCF. Header lines are added for each destination
+INFO field and for each annotation database.
+
 ## Roadmap
 
 Planned features are tracked with `bd` issues.
@@ -347,33 +380,11 @@ Design decisions to settle before implementation:
 - whether missing genotypes count as absence
 - projected VCF output vs tabular summaries
 
-### Variant Annotation
+### Annotation Follow-Ups
 
-Planned command for adding database annotations to VCF records:
-
-```bash
-varlock annotate \
-  --input calls.vcf.gz \
-  --database gnomad.vcf.gz \
-  --annotation gnomad:AF=gnomAD_AF,AC=gnomAD_AC \
-  --output calls.annotated.vcf.gz
-```
-
-Multiple databases should be namespaced and deterministic:
-
-```bash
-varlock annotate \
-  --input calls.vcf.gz \
-  --database common=dbs/common.vcf.gz \
-  --database cohort=dbs/cohort_freqs.vcf.gz \
-  --annotation common:AF=common_AF \
-  --annotation cohort:AF=cohort_AF \
-  --output calls.annotated.vcf.gz
-```
-
-Initial database support should focus on bgzipped/indexed VCF-like resources
-with INFO frequency fields. Later adapters can support TSV/BED-style variant or
-interval databases.
+The initial annotation command supports exact single-ALT VCF-like databases.
+Future work should add indexed lookup, normalization, multi-ALT handling, and
+TSV/BED-style variant or interval database adapters.
 
 Design decisions to settle before implementation:
 
