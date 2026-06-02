@@ -3,6 +3,14 @@ name = "varlock"
 version = "0.1.0"
 edition = "2024"
 description = "Variant calling CLI from BAM alignments"
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README*",
+    "src/",
+    "tests/",
+    "images/",
+]
 
 [features]
 default = []
