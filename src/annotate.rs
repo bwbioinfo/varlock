@@ -11,13 +11,16 @@ use anyhow::{Context, Result, bail};
 use flate2::read::MultiGzDecoder;
 use noodles_bgzf as bgzf;
 use noodles_core::{Position, Region};
-use noodles_csi::binning_index::{
-    self,
-    index::reference_sequence::bin::Chunk,
-    index::reference_sequence::index::BinnedIndex,
-    index::{
-        Header as TabixHeader,
-        header::{Format as TabixFormat, ReferenceSequenceNames},
+use noodles_csi::{
+    self as csi,
+    binning_index::{
+        self,
+        index::reference_sequence::bin::Chunk,
+        index::reference_sequence::index::BinnedIndex,
+        index::{
+            Header as TabixHeader,
+            header::{Format as TabixFormat, ReferenceSequenceNames},
+        },
     },
 };
 use noodles_tabix as tabix;
@@ -160,6 +163,11 @@ enum DatabaseLookup {
         mappings: Vec<FieldMapping>,
         reader: noodles_csi::io::IndexedReader<bgzf::io::Reader<File>, tabix::Index>,
     },
+    Csi {
+        name: String,
+        mappings: Vec<FieldMapping>,
+        reader: noodles_csi::io::IndexedReader<bgzf::io::Reader<File>, csi::Index>,
+    },
 }
 
 struct AnnotationLookup {
@@ -203,6 +211,31 @@ impl AnnotationLookup {
                     mappings: db_mappings.clone(),
                     reader,
                 });
+            } else if csi_index_path(&db.path).exists() {
+                let index_path = csi_index_path(&db.path);
+                let index = csi::fs::read(&index_path).with_context(|| {
+                    format!("failed to read CSI index {}", index_path.display())
+                })?;
+                let file = File::open(&db.path).with_context(|| {
+                    format!(
+                        "failed to open CSI-indexed annotation database {}",
+                        db.path.display()
+                    )
+                })?;
+                let reader = csi::io::IndexedReader::new(file, index);
+                log_verbose(
+                    ctx,
+                    format!(
+                        "annotate stage=open_database name={} mode=csi path={}",
+                        db.name,
+                        db.path.display()
+                    ),
+                );
+                opened.push(DatabaseLookup::Csi {
+                    name: db.name.clone(),
+                    mappings: db_mappings.clone(),
+                    reader,
+                });
             } else {
                 let annotations = load_one_annotation_database(db, db_mappings)?;
                 log_verbose(
@@ -235,7 +268,14 @@ impl AnnotationLookup {
                     mappings,
                     reader,
                 } => {
-                    out.extend(query_tabix_database(name, mappings, reader, key)?);
+                    out.extend(query_indexed_database(name, mappings, reader, key)?);
+                }
+                DatabaseLookup::Csi {
+                    name,
+                    mappings,
+                    reader,
+                } => {
+                    out.extend(query_indexed_database(name, mappings, reader, key)?);
                 }
             }
         }
@@ -248,6 +288,7 @@ impl AnnotationLookup {
             .map(|db| match db {
                 DatabaseLookup::InMemory { annotations, .. } => annotations.len(),
                 DatabaseLookup::Tabix { .. } => 0,
+                DatabaseLookup::Csi { .. } => 0,
             })
             .sum()
     }
@@ -525,12 +566,15 @@ fn index_record_from_line(line: &str) -> Result<Option<IndexRecord>> {
     }))
 }
 
-fn query_tabix_database(
+fn query_indexed_database<I>(
     db_name: &str,
     mappings: &[FieldMapping],
-    reader: &mut noodles_csi::io::IndexedReader<bgzf::io::Reader<File>, tabix::Index>,
+    reader: &mut noodles_csi::io::IndexedReader<bgzf::io::Reader<File>, I>,
     key: &VariantKey,
-) -> Result<AnnotationValues> {
+) -> Result<AnnotationValues>
+where
+    I: csi::BinningIndex,
+{
     let region = format!("{}:{}-{}", key.chrom, key.pos, key.pos)
         .parse::<Region>()
         .with_context(|| {
@@ -629,6 +673,15 @@ fn is_gz_path(path: &Path) -> bool {
 fn tabix_index_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.tbi",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ))
+}
+
+fn csi_index_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        "{}.csi",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default()
@@ -797,6 +850,48 @@ mod tests {
     }
 
     #[test]
+    fn annotate_vcf_uses_csi_indexed_database_when_available() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("input.vcf");
+        let db = dir.path().join("db.vcf.gz");
+        let output = dir.path().join("out.vcf.gz");
+
+        std::fs::write(
+            &input,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC\t.\tPASS\t.\n",
+        )?;
+        write_bgzipped_vcf_with_csi(
+            &db,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC\t.\tPASS\tAF=0.25\nchr1\t11\t.\tA\tG\t.\tPASS\tAF=0.5\n",
+        )?;
+
+        let databases = parse_database_specs(&[format!("db={}", db.display())])?;
+        let mappings = parse_annotation_mappings(&["db:AF=db_AF".to_string()], &databases)?;
+        let mut lookup = AnnotationLookup::open(
+            &databases,
+            &mappings,
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+        annotate_vcf(
+            &input,
+            &output,
+            IndexType::Csi,
+            &databases,
+            &mappings,
+            &mut lookup,
+        )?;
+
+        let mut reader = bgzf::io::Reader::new(File::open(output)?);
+        let mut text = String::new();
+        reader.read_to_string(&mut text)?;
+        assert!(text.contains("chr1\t10\t.\tA\tC\t.\tPASS\tdb_AF=0.25"));
+        Ok(())
+    }
+
+    #[test]
     fn skips_multi_alt_records_for_initial_exact_key_mode() -> Result<()> {
         let mappings = vec![FieldMapping {
             src: "AF".to_string(),
@@ -853,6 +948,55 @@ mod tests {
 
         let index = indexer.build();
         let mut index_writer = tabix::io::Writer::new(File::create(tabix_index_path(path))?);
+        index_writer.write_index(&index)?;
+        Ok(())
+    }
+
+    fn write_bgzipped_vcf_with_csi(path: &Path, text: &str) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = bgzf::io::writer::Builder::default().build_from_writer(file);
+        let mut indexer = binning_index::Indexer::<BinnedIndex>::default();
+        let mut reference_ids = HashMap::new();
+        let mut reference_names = Vec::new();
+
+        for line in text.lines() {
+            if line.starts_with('#') {
+                writeln!(writer, "{line}")?;
+            } else {
+                let record = index_record_from_line(line)?.context("missing record")?;
+                let reference_sequence_id =
+                    reference_id_for(&mut reference_ids, &mut reference_names, &record.chrom);
+                let chunk_start = writer.virtual_position();
+                writeln!(writer, "{line}")?;
+                let chunk_end = writer.virtual_position();
+                indexer.add_record(
+                    Some((
+                        reference_sequence_id,
+                        record.position,
+                        record.position,
+                        true,
+                    )),
+                    Chunk::new(chunk_start, chunk_end),
+                )?;
+            }
+        }
+        writer.try_finish()?;
+
+        let mut csi_reference_names = ReferenceSequenceNames::new();
+        for name in &reference_names {
+            csi_reference_names.insert(name.as_str().into());
+        }
+        let header = TabixHeader::builder()
+            .set_format(TabixFormat::Vcf)
+            .set_reference_sequence_name_index(0)
+            .set_start_position_index(1)
+            .set_end_position_index(None)
+            .set_line_comment_prefix(b'#')
+            .set_line_skip_count(0)
+            .set_reference_sequence_names(csi_reference_names)
+            .build();
+        let index = indexer.set_header(header).build(reference_names.len());
+        let mut index_writer = csi::io::Writer::new(File::create(csi_index_path(path))?);
         index_writer.write_index(&index)?;
         Ok(())
     }
