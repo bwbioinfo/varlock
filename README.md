@@ -304,18 +304,23 @@ varlock --log-file run.log call-targets \
 
 ## Variant Annotation
 
-`annotate` adds INFO annotations to an input VCF using exact
-`CHROM, POS, REF, ALT` matches from one or more VCF-like databases. If a
-database has an adjacent `.tbi` or `.csi` index, varlock queries it by input
-variant position; otherwise it loads that database into memory. Multi-ALT
-database records are split by ALT for matching, and mapped comma-valued fields
-with one value per ALT are emitted in input ALT order.
+`annotate` adds INFO annotations to an input VCF using `CHROM, POS, REF, ALT`
+matches from one or more VCF-like databases. By default, matching is exact. Use
+`--reference` to normalize simple indel representations before matching; this
+preserves the original input records while comparing normalized keys. If no
+reference is supplied and a database has an adjacent `.tbi` or `.csi` index,
+varlock queries it by input variant position; otherwise it loads that database
+into memory. Normalized matching currently loads databases into memory so their
+keys can be normalized. Multi-ALT database records are split by ALT for matching,
+and mapped comma-valued fields with one value per ALT are emitted in input ALT
+order.
 
 ```bash
 varlock annotate \
   --input calls.vcf.gz \
   --database gnomad=gnomad.sites.vcf.gz \
   --annotation gnomad:AF=gnomAD_AF,AC=gnomAD_AC \
+  --reference hg38/hg38.fa \
   --index-type csi \
   --output calls.annotated.vcf.gz
 ```
@@ -386,10 +391,9 @@ Design decisions to settle before implementation:
 
 ### Annotation Follow-Ups
 
-The annotation command supports exact VCF-like database matching, multi-ALT
-records, and indexed lookup for `.tbi` and `.csi` databases. Future work should
-add reference-normalized matching and TSV/BED-style variant or interval database
-adapters.
+The annotation command supports exact and reference-normalized VCF-like database
+matching, multi-ALT records, and indexed lookup for `.tbi` and `.csi` databases.
+Future work should add TSV/BED-style variant or interval database adapters.
 
 Design decisions to settle before implementation:
 

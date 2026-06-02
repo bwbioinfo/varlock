@@ -69,7 +69,7 @@ enum Command {
     #[cfg(feature = "wgpu")]
     CallTargetsGpu(CallTargetsGpuArgs),
 
-    /// Annotate VCF records from exact-key VCF-like databases
+    /// Annotate VCF records from VCF-like databases
     Annotate(AnnotateArgs),
 }
 
@@ -94,6 +94,10 @@ pub struct AnnotateArgs {
     /// Output VCF.gz path
     #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
     pub output: PathBuf,
+
+    /// Reference FASTA for reference-normalized annotation matching
+    #[arg(short = 'r', long = "reference", value_name = "FASTA")]
+    pub reference: Option<PathBuf>,
 
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]

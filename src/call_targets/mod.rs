@@ -3,7 +3,7 @@ pub(crate) mod gpu;
 mod observation;
 mod output;
 mod pileup;
-mod reference;
+pub(crate) mod reference;
 mod samples;
 mod targets;
 mod types;

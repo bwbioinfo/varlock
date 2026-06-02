@@ -40,6 +40,7 @@ fn annotate_help_lists_index_type() -> Result<()> {
     assert!(output.status.success(), "{}", output_text(&output));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--reference"));
     assert!(stdout.contains("--index-type"));
     assert!(stdout.contains("possible values: csi, tbi"));
     Ok(())

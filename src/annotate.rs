@@ -25,6 +25,7 @@ use noodles_csi::{
 };
 use noodles_tabix as tabix;
 
+use crate::call_targets::reference::{FastaIndex, open_fasta_index};
 use crate::{AnnotateArgs, ExecutionContext, IndexType, log_verbose};
 
 #[derive(Clone, Debug)]
@@ -68,11 +69,117 @@ impl Hash for VariantKey {
 type AnnotationValues = BTreeMap<String, String>;
 type AnnotationMap = HashMap<VariantKey, AnnotationValues>;
 
+struct VariantNormalizer {
+    fasta: FastaIndex,
+}
+
+impl VariantNormalizer {
+    fn open(reference: &Path) -> Result<Self> {
+        Ok(Self {
+            fasta: open_fasta_index(reference)?,
+        })
+    }
+
+    fn normalize_key(&mut self, key: VariantKey) -> Result<VariantKey> {
+        if is_symbolic_or_special_allele(&key.ref_allele)
+            || is_symbolic_or_special_allele(&key.alt_allele)
+        {
+            return Ok(key);
+        }
+
+        let mut pos = key
+            .pos
+            .parse::<u32>()
+            .with_context(|| format!("invalid VCF position {:?}", key.pos))?;
+        let mut ref_allele = key.ref_allele.to_ascii_uppercase();
+        let mut alt_allele = key.alt_allele.to_ascii_uppercase();
+
+        trim_common_suffix(&mut ref_allele, &mut alt_allele);
+        trim_common_prefix(&mut pos, &mut ref_allele, &mut alt_allele);
+
+        if ref_allele.len() != alt_allele.len() {
+            while pos > 1 {
+                let prev_base = self.fasta.fetch_base(&key.chrom, pos - 1)? as char;
+                let Some(ref_last) = ref_allele.chars().last() else {
+                    break;
+                };
+                let Some(alt_last) = alt_allele.chars().last() else {
+                    break;
+                };
+                if ref_last != prev_base || alt_last != prev_base {
+                    break;
+                }
+                ref_allele.pop();
+                alt_allele.pop();
+                ref_allele.insert(0, prev_base);
+                alt_allele.insert(0, prev_base);
+                pos -= 1;
+            }
+        }
+
+        trim_common_suffix(&mut ref_allele, &mut alt_allele);
+        trim_common_prefix(&mut pos, &mut ref_allele, &mut alt_allele);
+
+        Ok(VariantKey {
+            chrom: key.chrom,
+            pos: pos.to_string(),
+            ref_allele,
+            alt_allele,
+        })
+    }
+}
+
+fn is_symbolic_or_special_allele(allele: &str) -> bool {
+    allele == "*"
+        || allele.starts_with('<')
+        || allele.contains('>')
+        || allele.contains('[')
+        || allele.contains(']')
+}
+
+fn trim_common_suffix(ref_allele: &mut String, alt_allele: &mut String) {
+    while ref_allele.len() > 1 && alt_allele.len() > 1 {
+        let Some(ref_last) = ref_allele.chars().last() else {
+            break;
+        };
+        let Some(alt_last) = alt_allele.chars().last() else {
+            break;
+        };
+        if ref_last != alt_last {
+            break;
+        }
+        ref_allele.pop();
+        alt_allele.pop();
+    }
+}
+
+fn trim_common_prefix(pos: &mut u32, ref_allele: &mut String, alt_allele: &mut String) {
+    while ref_allele.len() > 1 && alt_allele.len() > 1 {
+        let Some(ref_first) = ref_allele.chars().next() else {
+            break;
+        };
+        let Some(alt_first) = alt_allele.chars().next() else {
+            break;
+        };
+        if ref_first != alt_first {
+            break;
+        }
+        ref_allele.remove(0);
+        alt_allele.remove(0);
+        *pos = pos.saturating_add(1);
+    }
+}
+
 pub(crate) fn run(args: AnnotateArgs, ctx: &ExecutionContext) -> Result<()> {
     let started = Instant::now();
     let databases = parse_database_specs(&args.databases)?;
     let mappings = parse_annotation_mappings(&args.annotations, &databases)?;
-    let mut lookup = AnnotationLookup::open(&databases, &mappings, ctx)?;
+    let mut normalizer = args
+        .reference
+        .as_deref()
+        .map(VariantNormalizer::open)
+        .transpose()?;
+    let mut lookup = AnnotationLookup::open(&databases, &mappings, normalizer.as_mut(), ctx)?;
 
     annotate_vcf(
         &args.input,
@@ -81,6 +188,7 @@ pub(crate) fn run(args: AnnotateArgs, ctx: &ExecutionContext) -> Result<()> {
         &databases,
         &mappings,
         &mut lookup,
+        normalizer.as_mut(),
     )?;
 
     log_verbose(
@@ -178,6 +286,7 @@ impl AnnotationLookup {
     fn open(
         databases: &[DatabaseSpec],
         mappings: &HashMap<String, Vec<FieldMapping>>,
+        mut normalizer: Option<&mut VariantNormalizer>,
         ctx: &ExecutionContext,
     ) -> Result<Self> {
         let mut opened = Vec::with_capacity(databases.len());
@@ -189,7 +298,7 @@ impl AnnotationLookup {
                 )
             })?;
 
-            if tabix_index_path(&db.path).exists() {
+            if normalizer.is_none() && tabix_index_path(&db.path).exists() {
                 let reader = tabix::io::indexed_reader::Builder::default()
                     .build_from_path(&db.path)
                     .with_context(|| {
@@ -211,7 +320,7 @@ impl AnnotationLookup {
                     mappings: db_mappings.clone(),
                     reader,
                 });
-            } else if csi_index_path(&db.path).exists() {
+            } else if normalizer.is_none() && csi_index_path(&db.path).exists() {
                 let index_path = csi_index_path(&db.path);
                 let index = csi::fs::read(&index_path).with_context(|| {
                     format!("failed to read CSI index {}", index_path.display())
@@ -237,7 +346,8 @@ impl AnnotationLookup {
                     reader,
                 });
             } else {
-                let annotations = load_one_annotation_database(db, db_mappings)?;
+                let annotations =
+                    load_one_annotation_database(db, db_mappings, normalizer.as_deref_mut())?;
                 log_verbose(
                     ctx,
                     format!(
@@ -328,6 +438,7 @@ impl AnnotationLookup {
 fn load_one_annotation_database(
     db: &DatabaseSpec,
     db_mappings: &[FieldMapping],
+    mut normalizer: Option<&mut VariantNormalizer>,
 ) -> Result<AnnotationMap> {
     let mut out: AnnotationMap = HashMap::new();
     let mut reader = open_text_reader(&db.path)
@@ -336,7 +447,7 @@ fn load_one_annotation_database(
     while reader.read_line(&mut line)? != 0 {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            let records = parse_database_records(trimmed, db_mappings)?;
+            let records = parse_database_records(trimmed, db_mappings, normalizer.as_deref_mut())?;
             for (key, values) in records {
                 out.entry(key).or_default().extend(values);
             }
@@ -353,6 +464,7 @@ fn annotate_vcf(
     databases: &[DatabaseSpec],
     mappings: &HashMap<String, Vec<FieldMapping>>,
     lookup: &mut AnnotationLookup,
+    mut normalizer: Option<&mut VariantNormalizer>,
 ) -> Result<()> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
@@ -383,7 +495,7 @@ fn annotate_vcf(
                 bail!("invalid VCF record for indexing: {trimmed}");
             };
             let chunk_start = writer.virtual_position();
-            let annotated = annotate_record_line(trimmed, lookup)?;
+            let annotated = annotate_record_line(trimmed, lookup, normalizer.as_deref_mut())?;
             writeln!(writer, "{annotated}")?;
             let chunk_end = writer.virtual_position();
             output_index.add_record(&index_record, Chunk::new(chunk_start, chunk_end))?;
@@ -426,12 +538,16 @@ fn write_annotation_headers<W: Write>(
     Ok(())
 }
 
-fn annotate_record_line(line: &str, lookup: &mut AnnotationLookup) -> Result<String> {
+fn annotate_record_line(
+    line: &str,
+    lookup: &mut AnnotationLookup,
+    normalizer: Option<&mut VariantNormalizer>,
+) -> Result<String> {
     let mut fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() < 8 {
         bail!("invalid VCF record with fewer than 8 fields: {line}");
     }
-    let keys = variant_keys_from_fields(&fields);
+    let keys = variant_keys_from_fields(&fields, normalizer)?;
     if keys.is_empty() {
         return Ok(line.to_string());
     }
@@ -622,7 +738,7 @@ where
     {
         let record = result.with_context(|| format!("failed to read tabix record {db_name:?}"))?;
         let line = record.as_ref();
-        for (record_key, values) in parse_database_records(line, mappings)? {
+        for (record_key, values) in parse_database_records(line, mappings, None)? {
             if record_key == *key {
                 out.extend(values);
             }
@@ -634,12 +750,13 @@ where
 fn parse_database_records(
     line: &str,
     mappings: &[FieldMapping],
+    normalizer: Option<&mut VariantNormalizer>,
 ) -> Result<Vec<(VariantKey, AnnotationValues)>> {
     let fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() < 8 {
         bail!("invalid database VCF record with fewer than 8 fields: {line}");
     }
-    let keys = variant_keys_from_fields(&fields);
+    let keys = variant_keys_from_fields(&fields, normalizer)?;
     if keys.is_empty() {
         return Ok(Vec::new());
     }
@@ -663,33 +780,45 @@ fn parse_database_records(
     Ok(records)
 }
 
-fn variant_keys_from_fields(fields: &[&str]) -> Vec<VariantKey> {
+fn variant_keys_from_fields(
+    fields: &[&str],
+    mut normalizer: Option<&mut VariantNormalizer>,
+) -> Result<Vec<VariantKey>> {
     let Some(chrom) = fields.first() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(pos) = fields.get(1) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(ref_allele) = fields.get(3) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(alt_field) = fields.get(4) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if *alt_field == "." || alt_field.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    alt_field
+    let mut keys = Vec::new();
+    for alt in alt_field
         .split(',')
         .filter(|alt| !alt.is_empty() && *alt != ".")
-        .map(|alt| VariantKey {
+    {
+        let key = VariantKey {
             chrom: (*chrom).to_string(),
             pos: (*pos).to_string(),
             ref_allele: (*ref_allele).to_string(),
             alt_allele: alt.to_string(),
-        })
-        .collect()
+        };
+        let key = if let Some(normalizer) = normalizer.as_deref_mut() {
+            normalizer.normalize_key(key)?
+        } else {
+            key
+        };
+        keys.push(key);
+    }
+    Ok(keys)
 }
 
 fn annotation_value_for_alt(value: &str, alt_count: usize, alt_index: usize) -> String {
@@ -812,6 +941,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -824,6 +954,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);
@@ -858,6 +989,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -870,6 +1002,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         assert!(dir.path().join("out.vcf.gz.tbi").exists());
@@ -897,6 +1030,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -909,6 +1043,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);
@@ -939,6 +1074,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -951,6 +1087,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);
@@ -966,7 +1103,8 @@ mod tests {
             src: "AF".to_string(),
             dest: "db_AF".to_string(),
         }];
-        let parsed = parse_database_records("chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2", &mappings)?;
+        let parsed =
+            parse_database_records("chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2", &mappings, None)?;
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].0.alt_allele, "C");
         assert_eq!(parsed[0].1["db_AF"], "0.1");
@@ -996,6 +1134,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -1008,6 +1147,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);
@@ -1039,6 +1179,7 @@ mod tests {
         let mut lookup = AnnotationLookup::open(
             &databases,
             &mappings,
+            None,
             &ExecutionContext {
                 verbose: 0,
                 threads: 1,
@@ -1051,6 +1192,7 @@ mod tests {
             &databases,
             &mappings,
             &mut lookup,
+            None,
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);
@@ -1061,12 +1203,76 @@ mod tests {
     }
 
     #[test]
+    fn annotate_vcf_matches_left_shifted_indel_with_reference() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("input.vcf");
+        let db = dir.path().join("db.vcf");
+        let output = dir.path().join("out.vcf.gz");
+        let reference = dir.path().join("ref.fa");
+
+        write_reference_with_fai(&reference, "chr1", "AAAAAA")?;
+        std::fs::write(
+            &input,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t3\t.\tAA\tA\t.\tPASS\t.\n",
+        )?;
+        std::fs::write(
+            &db,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t1\t.\tAA\tA\t.\tPASS\tAF=0.25\n",
+        )?;
+
+        let databases = parse_database_specs(&[format!("db={}", db.display())])?;
+        let mappings = parse_annotation_mappings(&["db:AF=db_AF".to_string()], &databases)?;
+        let mut normalizer = VariantNormalizer::open(&reference)?;
+        let mut lookup = AnnotationLookup::open(
+            &databases,
+            &mappings,
+            Some(&mut normalizer),
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+        annotate_vcf(
+            &input,
+            &output,
+            IndexType::Csi,
+            &databases,
+            &mappings,
+            &mut lookup,
+            Some(&mut normalizer),
+        )?;
+
+        let mut reader = bgzf::io::Reader::new(File::open(output)?);
+        let mut text = String::new();
+        reader.read_to_string(&mut text)?;
+        assert!(text.contains("chr1\t3\t.\tAA\tA\t.\tPASS\tdb_AF=0.25"));
+        Ok(())
+    }
+
+    #[test]
+    fn normalizer_leaves_symbolic_alleles_unchanged() -> Result<()> {
+        let dir = tempdir()?;
+        let reference = dir.path().join("ref.fa");
+        write_reference_with_fai(&reference, "chr1", "AAAAAA")?;
+        let mut normalizer = VariantNormalizer::open(&reference)?;
+        let key = VariantKey {
+            chrom: "chr1".to_string(),
+            pos: "3".to_string(),
+            ref_allele: "A".to_string(),
+            alt_allele: "<DEL>".to_string(),
+        };
+        let normalized = normalizer.normalize_key(key.clone())?;
+        assert_eq!(normalized, key);
+        Ok(())
+    }
+
+    #[test]
     fn annotates_flag_info_as_one() -> Result<()> {
         let mappings = vec![FieldMapping {
             src: "COMMON".to_string(),
             dest: "db_COMMON".to_string(),
         }];
-        let parsed = parse_database_records("chr1\t10\t.\tA\tC\t.\tPASS\tCOMMON", &mappings)?;
+        let parsed = parse_database_records("chr1\t10\t.\tA\tC\t.\tPASS\tCOMMON", &mappings, None)?;
         let (_, values) = parsed.first().context("missing parsed record")?;
         assert_eq!(values["db_COMMON"], "1");
         Ok(())
@@ -1156,6 +1362,20 @@ mod tests {
         let index = indexer.set_header(header).build(reference_names.len());
         let mut index_writer = csi::io::Writer::new(File::create(csi_index_path(path))?);
         index_writer.write_index(&index)?;
+        Ok(())
+    }
+
+    fn write_reference_with_fai(path: &Path, name: &str, sequence: &str) -> Result<()> {
+        let fasta = format!(">{name}\n{sequence}\n");
+        std::fs::write(path, fasta)?;
+        let offset = name.len() + 2;
+        let fai = format!(
+            "{name}\t{}\t{offset}\t{}\t{}\n",
+            sequence.len(),
+            sequence.len(),
+            sequence.len() + 1
+        );
+        std::fs::write(path.with_extension("fa.fai"), fai)?;
         Ok(())
     }
 }
