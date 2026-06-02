@@ -307,9 +307,9 @@ varlock --log-file run.log call-targets \
 `annotate` adds INFO annotations to an input VCF using exact
 `CHROM, POS, REF, ALT` matches from one or more VCF-like databases. If a
 database has an adjacent `.tbi` or `.csi` index, varlock queries it by input
-variant position; otherwise it loads that database into memory. The current
-annotation mode supports single-ALT records. Multi-ALT database and input
-records are left unannotated.
+variant position; otherwise it loads that database into memory. Multi-ALT
+database records are split by ALT for matching, and mapped comma-valued fields
+with one value per ALT are emitted in input ALT order.
 
 ```bash
 varlock annotate \
@@ -386,9 +386,9 @@ Design decisions to settle before implementation:
 
 ### Annotation Follow-Ups
 
-The initial annotation command supports exact single-ALT VCF-like databases and
-indexed lookup for `.tbi` and `.csi` databases. Future work should add
-normalization, multi-ALT handling, and TSV/BED-style variant or interval database
+The annotation command supports exact VCF-like database matching, multi-ALT
+records, and indexed lookup for `.tbi` and `.csi` databases. Future work should
+add reference-normalized matching and TSV/BED-style variant or interval database
 adapters.
 
 Design decisions to settle before implementation:

@@ -282,6 +282,37 @@ impl AnnotationLookup {
         Ok(out)
     }
 
+    fn lookup_record(&mut self, keys: &[VariantKey]) -> Result<AnnotationValues> {
+        let mut per_alt = Vec::with_capacity(keys.len());
+        for key in keys {
+            per_alt.push(self.lookup(key)?);
+        }
+
+        let mut field_names = BTreeMap::new();
+        for values in &per_alt {
+            for field in values.keys() {
+                field_names.insert(field.clone(), ());
+            }
+        }
+
+        let mut out = AnnotationValues::new();
+        for field in field_names.keys() {
+            let values = per_alt
+                .iter()
+                .map(|values| {
+                    values
+                        .get(field)
+                        .cloned()
+                        .unwrap_or_else(|| ".".to_string())
+                })
+                .collect::<Vec<_>>();
+            if values.iter().any(|value| value != ".") {
+                out.insert(field.clone(), values.join(","));
+            }
+        }
+        Ok(out)
+    }
+
     fn loaded_site_count(&self) -> usize {
         self.databases
             .iter()
@@ -304,11 +335,11 @@ fn load_one_annotation_database(
     let mut line = String::new();
     while reader.read_line(&mut line)? != 0 {
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && let Some((key, values)) = parse_database_record(trimmed, db_mappings)?
-        {
-            out.entry(key).or_default().extend(values);
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            let records = parse_database_records(trimmed, db_mappings)?;
+            for (key, values) in records {
+                out.entry(key).or_default().extend(values);
+            }
         }
         line.clear();
     }
@@ -386,7 +417,7 @@ fn write_annotation_headers<W: Write>(
             for mapping in db_mappings {
                 writeln!(
                     writer,
-                    "##INFO=<ID={},Number=1,Type=String,Description=\"Annotation from {}:{}\">",
+                    "##INFO=<ID={},Number=A,Type=String,Description=\"Annotation from {}:{}\">",
                     mapping.dest, db.name, mapping.src
                 )?;
             }
@@ -400,10 +431,11 @@ fn annotate_record_line(line: &str, lookup: &mut AnnotationLookup) -> Result<Str
     if fields.len() < 8 {
         bail!("invalid VCF record with fewer than 8 fields: {line}");
     }
-    let Some(key) = variant_key_from_fields(&fields) else {
+    let keys = variant_keys_from_fields(&fields);
+    if keys.is_empty() {
         return Ok(line.to_string());
-    };
-    let values = lookup.lookup(&key)?;
+    }
+    let values = lookup.lookup_record(&keys)?;
     if values.is_empty() {
         return Ok(line.to_string());
     }
@@ -590,50 +622,87 @@ where
     {
         let record = result.with_context(|| format!("failed to read tabix record {db_name:?}"))?;
         let line = record.as_ref();
-        if let Some((record_key, values)) = parse_database_record(line, mappings)?
-            && record_key == *key
-        {
-            out.extend(values);
+        for (record_key, values) in parse_database_records(line, mappings)? {
+            if record_key == *key {
+                out.extend(values);
+            }
         }
     }
     Ok(out)
 }
 
-fn parse_database_record(
+fn parse_database_records(
     line: &str,
     mappings: &[FieldMapping],
-) -> Result<Option<(VariantKey, AnnotationValues)>> {
+) -> Result<Vec<(VariantKey, AnnotationValues)>> {
     let fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() < 8 {
         bail!("invalid database VCF record with fewer than 8 fields: {line}");
     }
-    let Some(key) = variant_key_from_fields(&fields) else {
-        return Ok(None);
-    };
+    let keys = variant_keys_from_fields(&fields);
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let alt_count = keys.len();
     let info = parse_info(fields[7]);
-    let mut values = AnnotationValues::new();
-    for mapping in mappings {
-        if let Some(value) = info.get(mapping.src.as_str()) {
-            values.insert(mapping.dest.clone(), value.clone());
+    let mut records = Vec::new();
+    for (alt_index, key) in keys.into_iter().enumerate() {
+        let mut values = AnnotationValues::new();
+        for mapping in mappings {
+            if let Some(value) = info.get(mapping.src.as_str()) {
+                values.insert(
+                    mapping.dest.clone(),
+                    annotation_value_for_alt(value, alt_count, alt_index),
+                );
+            }
+        }
+        if !values.is_empty() {
+            records.push((key, values));
         }
     }
-    if values.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some((key, values)))
+    Ok(records)
 }
 
-fn variant_key_from_fields(fields: &[&str]) -> Option<VariantKey> {
-    let alt = fields.get(4)?;
-    if alt.contains(',') || *alt == "." || alt.is_empty() {
-        return None;
+fn variant_keys_from_fields(fields: &[&str]) -> Vec<VariantKey> {
+    let Some(chrom) = fields.first() else {
+        return Vec::new();
+    };
+    let Some(pos) = fields.get(1) else {
+        return Vec::new();
+    };
+    let Some(ref_allele) = fields.get(3) else {
+        return Vec::new();
+    };
+    let Some(alt_field) = fields.get(4) else {
+        return Vec::new();
+    };
+    if *alt_field == "." || alt_field.is_empty() {
+        return Vec::new();
     }
-    Some(VariantKey {
-        chrom: fields.first()?.to_string(),
-        pos: fields.get(1)?.to_string(),
-        ref_allele: fields.get(3)?.to_string(),
-        alt_allele: alt.to_string(),
-    })
+
+    alt_field
+        .split(',')
+        .filter(|alt| !alt.is_empty() && *alt != ".")
+        .map(|alt| VariantKey {
+            chrom: (*chrom).to_string(),
+            pos: (*pos).to_string(),
+            ref_allele: (*ref_allele).to_string(),
+            alt_allele: alt.to_string(),
+        })
+        .collect()
+}
+
+fn annotation_value_for_alt(value: &str, alt_count: usize, alt_index: usize) -> String {
+    let parts = value.split(',').collect::<Vec<_>>();
+    if parts.len() == alt_count {
+        parts
+            .get(alt_index)
+            .copied()
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn parse_info(info: &str) -> HashMap<&str, String> {
@@ -892,13 +961,102 @@ mod tests {
     }
 
     #[test]
-    fn skips_multi_alt_records_for_initial_exact_key_mode() -> Result<()> {
+    fn parses_multi_alt_database_records_by_alt() -> Result<()> {
         let mappings = vec![FieldMapping {
             src: "AF".to_string(),
             dest: "db_AF".to_string(),
         }];
-        let parsed = parse_database_record("chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2", &mappings)?;
-        assert!(parsed.is_none());
+        let parsed = parse_database_records("chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2", &mappings)?;
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0.alt_allele, "C");
+        assert_eq!(parsed[0].1["db_AF"], "0.1");
+        assert_eq!(parsed[1].0.alt_allele, "G");
+        assert_eq!(parsed[1].1["db_AF"], "0.2");
+        Ok(())
+    }
+
+    #[test]
+    fn annotate_vcf_adds_multi_alt_info_in_alt_order() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("input.vcf");
+        let db = dir.path().join("db.vcf");
+        let output = dir.path().join("out.vcf.gz");
+
+        std::fs::write(
+            &input,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC,G\t.\tPASS\t.\n",
+        )?;
+        std::fs::write(
+            &db,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.1,0.2\n",
+        )?;
+
+        let databases = parse_database_specs(&[format!("db={}", db.display())])?;
+        let mappings = parse_annotation_mappings(&["db:AF=db_AF".to_string()], &databases)?;
+        let mut lookup = AnnotationLookup::open(
+            &databases,
+            &mappings,
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+        annotate_vcf(
+            &input,
+            &output,
+            IndexType::Csi,
+            &databases,
+            &mappings,
+            &mut lookup,
+        )?;
+
+        let mut reader = bgzf::io::Reader::new(File::open(output)?);
+        let mut text = String::new();
+        reader.read_to_string(&mut text)?;
+        assert!(text.contains("##INFO=<ID=db_AF,Number=A"));
+        assert!(text.contains("chr1\t10\t.\tA\tC,G\t.\tPASS\tdb_AF=0.1,0.2"));
+        Ok(())
+    }
+
+    #[test]
+    fn annotate_vcf_marks_missing_multi_alt_annotations_with_dot() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("input.vcf");
+        let db = dir.path().join("db.vcf");
+        let output = dir.path().join("out.vcf.gz");
+
+        std::fs::write(
+            &input,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC,G\t.\tPASS\t.\n",
+        )?;
+        std::fs::write(
+            &db,
+            "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t10\t.\tA\tC\t.\tPASS\tAF=0.1\n",
+        )?;
+
+        let databases = parse_database_specs(&[format!("db={}", db.display())])?;
+        let mappings = parse_annotation_mappings(&["db:AF=db_AF".to_string()], &databases)?;
+        let mut lookup = AnnotationLookup::open(
+            &databases,
+            &mappings,
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+        annotate_vcf(
+            &input,
+            &output,
+            IndexType::Csi,
+            &databases,
+            &mappings,
+            &mut lookup,
+        )?;
+
+        let mut reader = bgzf::io::Reader::new(File::open(output)?);
+        let mut text = String::new();
+        reader.read_to_string(&mut text)?;
+        assert!(text.contains("chr1\t10\t.\tA\tC,G\t.\tPASS\tdb_AF=0.1,."));
         Ok(())
     }
 
@@ -908,8 +1066,8 @@ mod tests {
             src: "COMMON".to_string(),
             dest: "db_COMMON".to_string(),
         }];
-        let (_, values) =
-            parse_database_record("chr1\t10\t.\tA\tC\t.\tPASS\tCOMMON", &mappings)?.unwrap();
+        let parsed = parse_database_records("chr1\t10\t.\tA\tC\t.\tPASS\tCOMMON", &mappings)?;
+        let (_, values) = parsed.first().context("missing parsed record")?;
         assert_eq!(values["db_COMMON"], "1");
         Ok(())
     }
