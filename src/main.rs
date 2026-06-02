@@ -9,6 +9,7 @@ use std::{
 mod annotate;
 mod call_targets;
 mod fasta_prep;
+mod filter;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -71,6 +72,9 @@ enum Command {
 
     /// Annotate VCF records from VCF-like databases
     Annotate(AnnotateArgs),
+
+    /// Filter VCF records using INFO predicates
+    Filter(FilterArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -98,6 +102,33 @@ pub struct AnnotateArgs {
     /// Reference FASTA for reference-normalized annotation matching
     #[arg(short = 'r', long = "reference", value_name = "FASTA")]
     pub reference: Option<PathBuf>,
+
+    /// Index type for VCF.gz output
+    #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
+    pub index_type: IndexType,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FilterArgs {
+    /// Input VCF path (plain or .gz)
+    #[arg(short = 'i', long = "input", value_name = "VCF")]
+    pub input: PathBuf,
+
+    /// Output VCF.gz path
+    #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
+    pub output: PathBuf,
+
+    /// Require an INFO field to be present; repeat for multiple fields
+    #[arg(long = "require-info", value_name = "FIELD")]
+    pub require_info: Vec<String>,
+
+    /// Exclude records where an INFO field is present; repeat for multiple fields
+    #[arg(long = "exclude-info", value_name = "FIELD")]
+    pub exclude_info: Vec<String>,
+
+    /// Keep records where all numeric values in INFO FIELD are <= VALUE; repeatable
+    #[arg(long = "max-info", value_name = "FIELD=VALUE")]
+    pub max_info: Vec<String>,
 
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
@@ -258,6 +289,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "wgpu")]
         Command::CallTargetsGpu(args) => call_targets::gpu::run(args, &ctx),
         Command::Annotate(args) => annotate::run(args, &ctx),
+        Command::Filter(args) => filter::run(args, &ctx),
     }
 }
 

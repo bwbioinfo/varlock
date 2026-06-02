@@ -16,7 +16,8 @@ Current subcommands:
 - `call-targets` - CPU SNV calling from BAMs.
 - `call-targets-gpu` - GPU-accelerated count aggregation, available when built
   with the `wgpu` feature.
-- `annotate` - exact-key VCF annotation from VCF-like databases.
+- `annotate` - VCF annotation from VCF-like databases.
+- `filter` - INFO-based VCF filtering.
 
 ## Build
 
@@ -38,6 +39,7 @@ During development:
 cargo run -- call-targets --help
 cargo run --features wgpu -- call-targets-gpu --help
 cargo run -- annotate --help
+cargo run -- filter --help
 ```
 
 ## Inputs
@@ -340,6 +342,34 @@ varlock annotate \
 Annotation output is bgzipped VCF. Header lines are added for each destination
 INFO field and for each annotation database. Output indexes are written by
 default as CSI (`calls.annotated.vcf.gz.csi`); use `--index-type tbi` to write a
+tabix index instead.
+
+## VCF Filtering
+
+`filter` streams a VCF and keeps records that pass simple INFO predicates. This
+first filtering mode is intended for post-annotation frequency and marker-field
+filters.
+
+```bash
+varlock filter \
+  --input calls.annotated.vcf.gz \
+  --require-info gnomAD_AF \
+  --max-info gnomAD_AF=0.01 \
+  --output calls.rare.vcf.gz
+```
+
+Records can also be dropped when an INFO field is present:
+
+```bash
+varlock filter \
+  --input calls.annotated.vcf.gz \
+  --exclude-info common_AF \
+  --output calls.no_common.vcf.gz
+```
+
+For comma-valued INFO fields, `--max-info FIELD=VALUE` requires every numeric
+non-missing value in the field to be at or below the threshold. Filter output is
+bgzipped VCF with a CSI index by default; use `--index-type tbi` to write a
 tabix index instead.
 
 ## Roadmap
