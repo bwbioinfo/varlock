@@ -128,26 +128,16 @@ pub struct CallTargetsArgs {
         short = 'i',
         long = "input",
         value_name = "PATH",
-        required_unless_present_any = ["bamlist", "gpu_list"],
         conflicts_with = "bamlist"
     )]
     pub inputs: Vec<PathBuf>,
 
     /// File with one BAM path per line
-    #[arg(
-        long = "bamlist",
-        value_name = "FILE",
-        required_unless_present_any = ["inputs", "gpu_list"]
-    )]
+    #[arg(long = "bamlist", value_name = "FILE")]
     pub bamlist: Option<PathBuf>,
 
     /// Reference FASTA path (plain or bgzipped; index created automatically if missing)
-    #[arg(
-        short = 'r',
-        long = "reference",
-        value_name = "FASTA",
-        required_unless_present = "gpu_list"
-    )]
+    #[arg(short = 'r', long = "reference", value_name = "FASTA")]
     pub reference: Option<PathBuf>,
 
     /// BED file of target intervals (0-based, half-open); omit to call all covered positions
