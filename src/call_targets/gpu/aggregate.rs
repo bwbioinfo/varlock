@@ -74,32 +74,48 @@ pub(crate) fn create_chunk_states(
 ) -> Result<Vec<GpuChunkState>> {
     let mut states = Vec::with_capacity(chunk_plan.total_chunks);
     for chunk_idx in 0..chunk_plan.total_chunks {
-        let (site_start, site_end) =
-            chunk_site_range(chunk_idx, chunk_plan.max_sites_per_chunk, site_count);
-        let chunk_site_count = site_end.saturating_sub(site_start);
-        let buffer_size = kernel::counts_buffer_size(chunk_site_count, sample_count)?;
-        let counts_buffer = runtime.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("varlock.call_targets_gpu.aggregate.counts"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        if buffer_size > 0 {
-            let zeroes = vec![0u8; usize::try_from(buffer_size).context("buffer too large")?];
-            runtime.queue.write_buffer(&counts_buffer, 0, &zeroes);
-        }
-
-        states.push(GpuChunkState {
-            pending_obs: Vec::new(),
-            counts_buffer,
-            site_start: u32::try_from(site_start).context("chunk site start exceeds u32 range")?,
-            site_end: u32::try_from(site_end).context("chunk site end exceeds u32 range")?,
-        });
+        states.push(create_chunk_state(
+            chunk_idx,
+            chunk_plan,
+            runtime,
+            sample_count,
+            site_count,
+        )?);
     }
 
     Ok(states)
+}
+
+pub(crate) fn create_chunk_state(
+    chunk_idx: usize,
+    chunk_plan: &ChunkPlan,
+    runtime: &GpuRuntime,
+    sample_count: usize,
+    site_count: usize,
+) -> Result<GpuChunkState> {
+    let (site_start, site_end) =
+        chunk_site_range(chunk_idx, chunk_plan.max_sites_per_chunk, site_count);
+    let chunk_site_count = site_end.saturating_sub(site_start);
+    let buffer_size = kernel::counts_buffer_size(chunk_site_count, sample_count)?;
+    let counts_buffer = runtime.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("varlock.call_targets_gpu.aggregate.counts"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    if buffer_size > 0 {
+        let zeroes = vec![0u8; usize::try_from(buffer_size).context("buffer too large")?];
+        runtime.queue.write_buffer(&counts_buffer, 0, &zeroes);
+    }
+
+    Ok(GpuChunkState {
+        pending_obs: Vec::new(),
+        counts_buffer,
+        site_start: u32::try_from(site_start).context("chunk site start exceeds u32 range")?,
+        site_end: u32::try_from(site_end).context("chunk site end exceeds u32 range")?,
+    })
 }
 
 pub(crate) fn flush_chunk(

@@ -15,7 +15,9 @@ use anyhow::{Context, Result, bail};
 use crate::{CallTargetsGpuArgs, ExecutionContext, GpuBackend, call_targets, log_verbose};
 
 use self::{
-    aggregate::{build_chunk_plan, chunk_for_site, create_chunk_states, flush_chunk},
+    aggregate::{
+        build_chunk_plan, chunk_for_site, create_chunk_state, create_chunk_states, flush_chunk,
+    },
     kernel::create_kernel,
     runtime::{
         GpuSelector, auto_tuning_for_tier, classify_adapter, effective_matrix_budget,
@@ -111,16 +113,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     }
 
     let all_counts = if args.call.targets.is_some() {
-        run_static_target_gpu_path(
-            label,
-            ctx,
-            &args,
-            &runtime,
-            &kernel,
-            &prepared,
-            sample_count,
-            matrix_budget,
-        )?
+        run_static_target_gpu_path(label, ctx, &args, &gpu_workers, &prepared, sample_count)?
     } else {
         run_covered_gpu_path(
             label,
@@ -160,6 +153,11 @@ struct GpuWorkerRuntime {
     matrix_budget: usize,
     max_obs_upload: usize,
     flush_threshold: usize,
+}
+
+struct StaticGpuChunk {
+    worker_idx: usize,
+    state: aggregate::GpuChunkState,
 }
 
 fn build_gpu_worker_runtimes(
@@ -211,12 +209,13 @@ fn run_static_target_gpu_path(
     label: &str,
     ctx: &ExecutionContext,
     args: &CallTargetsGpuArgs,
-    runtime: &runtime::GpuRuntime,
-    kernel: &kernel::GpuAggregateKernel,
+    workers: &[GpuWorkerRuntime],
     prepared: &super::types::PreparedCallTargets,
     sample_count: usize,
-    matrix_budget: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
+    if workers.is_empty() {
+        bail!("no GPU workers available for static target aggregation");
+    }
     let target_started = Instant::now();
     let target_sites = Arc::new(build_target_site_map(&prepared.targets)?);
     if target_sites.is_empty() {
@@ -235,13 +234,22 @@ fn run_static_target_gpu_path(
         ),
     );
 
-    let chunk_plan = build_chunk_plan(target_sites.len(), sample_count, matrix_budget)?;
-    let mut chunks = create_chunk_states(&chunk_plan, &runtime, sample_count, target_sites.len())?;
+    let static_matrix_budget = workers
+        .iter()
+        .map(|worker| worker.matrix_budget)
+        .min()
+        .context("no GPU workers available for static chunk planning")?;
+    let chunk_plan = build_chunk_plan(target_sites.len(), sample_count, static_matrix_budget)?;
+    let mut chunks =
+        create_static_chunk_states(&chunk_plan, workers, sample_count, target_sites.len())?;
     log_verbose(
         ctx,
         format!(
-            "{label} chunks={} max_sites_per_chunk={} matrix_budget={}",
-            chunk_plan.total_chunks, chunk_plan.max_sites_per_chunk, matrix_budget
+            "{label} chunks={} max_sites_per_chunk={} matrix_budget={} gpu_workers={}",
+            chunk_plan.total_chunks,
+            chunk_plan.max_sites_per_chunk,
+            static_matrix_budget,
+            workers.len()
         ),
     );
 
@@ -272,7 +280,7 @@ fn run_static_target_gpu_path(
                     let Some(chunk) = chunks.get_mut(chunk_idx) else {
                         bail!("scan emitted observation for invalid chunk {}", chunk_idx);
                     };
-                    chunk.pending_obs.push(observation);
+                    chunk.state.pending_obs.push(observation);
                 }
             }
             Ok(ScanEvent::Progress { .. }) => {}
@@ -307,12 +315,32 @@ fn run_static_target_gpu_path(
         label,
         ctx,
         args,
-        runtime,
-        kernel,
+        workers,
         &mut chunks,
         &target_sites.site_keys,
         sample_count,
     )
+}
+
+fn create_static_chunk_states(
+    chunk_plan: &aggregate::ChunkPlan,
+    workers: &[GpuWorkerRuntime],
+    sample_count: usize,
+    site_count: usize,
+) -> Result<Vec<StaticGpuChunk>> {
+    let mut chunks = Vec::with_capacity(chunk_plan.total_chunks);
+    for chunk_idx in 0..chunk_plan.total_chunks {
+        let worker_idx = chunk_idx % workers.len();
+        let state = create_chunk_state(
+            chunk_idx,
+            chunk_plan,
+            &workers[worker_idx].runtime,
+            sample_count,
+            site_count,
+        )?;
+        chunks.push(StaticGpuChunk { worker_idx, state });
+    }
+    Ok(chunks)
 }
 
 fn run_covered_gpu_path(
@@ -502,19 +530,25 @@ fn aggregate_chunks(
     label: &str,
     ctx: &ExecutionContext,
     args: &CallTargetsGpuArgs,
-    runtime: &runtime::GpuRuntime,
-    kernel: &kernel::GpuAggregateKernel,
-    chunks: &mut [aggregate::GpuChunkState],
+    workers: &[GpuWorkerRuntime],
+    chunks: &mut [StaticGpuChunk],
     site_keys: &[SiteKey],
     sample_count: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
     let aggregate_started = Instant::now();
     let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
+    let mut worker_chunk_counts = vec![0usize; workers.len()];
+    let mut worker_obs_counts = vec![0usize; workers.len()];
     for chunk in chunks {
+        let worker = workers
+            .get(chunk.worker_idx)
+            .context("static chunk assigned to invalid GPU worker")?;
+        worker_chunk_counts[chunk.worker_idx] += 1;
+        worker_obs_counts[chunk.worker_idx] += chunk.state.pending_obs.len();
         let chunk_counts = flush_chunk(
-            chunk,
-            kernel,
-            runtime,
+            &mut chunk.state,
+            &worker.kernel,
+            &worker.runtime,
             site_keys,
             sample_count,
             args.call.max_depth,
@@ -524,8 +558,10 @@ fn aggregate_chunks(
     log_verbose(
         ctx,
         format!(
-            "{label} stage=aggregate elapsed={:.2?}",
-            aggregate_started.elapsed()
+            "{label} stage=aggregate elapsed={:.2?} worker_chunks={:?} worker_observations={:?}",
+            aggregate_started.elapsed(),
+            worker_chunk_counts,
+            worker_obs_counts
         ),
     );
 
