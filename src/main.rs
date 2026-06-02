@@ -94,6 +94,10 @@ pub struct AnnotateArgs {
     /// Output VCF.gz path
     #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
     pub output: PathBuf,
+
+    /// Index type for VCF.gz output
+    #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
+    pub index_type: IndexType,
 }
 
 #[cfg(feature = "wgpu")]

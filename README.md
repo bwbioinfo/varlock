@@ -305,16 +305,18 @@ varlock --log-file run.log call-targets \
 ## Variant Annotation
 
 `annotate` adds INFO annotations to an input VCF using exact
-`CHROM, POS, REF, ALT` matches from one or more VCF-like databases. The initial
-implementation loads database records into memory and supports single-ALT
-records. Multi-ALT database and input records are left unannotated in this first
-mode.
+`CHROM, POS, REF, ALT` matches from one or more VCF-like databases. If a
+database has an adjacent `.tbi` tabix index, varlock queries it by input variant
+position; otherwise it loads that database into memory. The current annotation
+mode supports single-ALT records. Multi-ALT database and input records are left
+unannotated.
 
 ```bash
 varlock annotate \
   --input calls.vcf.gz \
   --database gnomad=gnomad.sites.vcf.gz \
   --annotation gnomad:AF=gnomAD_AF,AC=gnomAD_AC \
+  --index-type csi \
   --output calls.annotated.vcf.gz
 ```
 
@@ -331,7 +333,9 @@ varlock annotate \
 ```
 
 Annotation output is bgzipped VCF. Header lines are added for each destination
-INFO field and for each annotation database.
+INFO field and for each annotation database. Output indexes are written by
+default as CSI (`calls.annotated.vcf.gz.csi`); use `--index-type tbi` to write a
+tabix index instead.
 
 ## Roadmap
 
@@ -382,9 +386,10 @@ Design decisions to settle before implementation:
 
 ### Annotation Follow-Ups
 
-The initial annotation command supports exact single-ALT VCF-like databases.
-Future work should add indexed lookup, normalization, multi-ALT handling, and
-TSV/BED-style variant or interval database adapters.
+The initial annotation command supports exact single-ALT VCF-like databases and
+tabix-indexed lookup for `.tbi` databases. Future work should add CSI database
+lookup, normalization, multi-ALT handling, and TSV/BED-style variant or interval
+database adapters.
 
 Design decisions to settle before implementation:
 
