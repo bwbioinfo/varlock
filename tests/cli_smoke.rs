@@ -48,6 +48,31 @@ fn annotate_help_lists_index_type() -> Result<()> {
 }
 
 #[test]
+fn call_targets_help_lists_pair_flags() -> Result<()> {
+    let output = run_varlock(&["call-targets", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--pair"));
+    assert!(stdout.contains("--tumor-min-alt-count"));
+    assert!(stdout.contains("--normal-max-alt-fraction"));
+    Ok(())
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn call_targets_gpu_help_lists_pair_flags() -> Result<()> {
+    let output = run_varlock(&["call-targets-gpu", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--pair"));
+    assert!(stdout.contains("--tumor-min-alt-count"));
+    assert!(stdout.contains("--normal-max-alt-fraction"));
+    Ok(())
+}
+
+#[test]
 fn filter_help_lists_info_predicates() -> Result<()> {
     let output = run_varlock(&["filter", "--help"])?;
     assert!(output.status.success(), "{}", output_text(&output));

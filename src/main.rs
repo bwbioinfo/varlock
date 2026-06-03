@@ -253,6 +253,48 @@ pub struct CallTargetsArgs {
     )]
     pub min_alt_fraction: f64,
 
+    /// Enable paired calling with tumor and normal sample names: tumor=S,normal=S
+    #[arg(long = "pair", value_name = "tumor=S,normal=S")]
+    pub pair: Option<String>,
+
+    /// Paired mode tumor minimum alt count
+    #[arg(
+        long = "tumor-min-alt-count",
+        value_name = "COUNT",
+        default_value_t = 1u32
+    )]
+    pub tumor_min_alt_count: u32,
+
+    /// Paired mode tumor minimum alt allele fraction (0.0-1.0)
+    #[arg(
+        long = "tumor-min-alt-fraction",
+        value_name = "FRACTION",
+        default_value_t = 0.0,
+        value_parser = parse_fraction
+    )]
+    pub tumor_min_alt_fraction: f64,
+
+    /// Paired mode normal maximum alt count
+    #[arg(
+        long = "normal-max-alt-count",
+        value_name = "COUNT",
+        default_value_t = 0u32
+    )]
+    pub normal_max_alt_count: u32,
+
+    /// Paired mode normal maximum alt allele fraction (0.0-1.0)
+    #[arg(
+        long = "normal-max-alt-fraction",
+        value_name = "FRACTION",
+        default_value_t = 0.0,
+        value_parser = parse_fraction
+    )]
+    pub normal_max_alt_fraction: f64,
+
+    /// Paired mode optional minimum normal depth
+    #[arg(long = "normal-min-depth", value_name = "DP")]
+    pub normal_min_depth: Option<u32>,
+
     /// Maximum read depth per sample at a site
     #[arg(long = "max-depth", value_name = "DP", default_value_t = 100_000u32)]
     pub max_depth: u32,

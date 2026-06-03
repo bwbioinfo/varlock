@@ -30,6 +30,27 @@ pub(crate) struct PreparedCallTargets {
     pub(crate) sample_names: Vec<String>,
     pub(crate) rg_to_sm: HashMap<String, String>,
     pub(crate) sample_index: HashMap<String, usize>,
+    #[allow(dead_code)]
+    pub(crate) paired: Option<PairedCallingConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PairedSampleRoles {
+    pub(crate) tumor: String,
+    pub(crate) normal: String,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct PairedCallingConfig {
+    pub(crate) roles: PairedSampleRoles,
+    pub(crate) tumor_index: usize,
+    pub(crate) normal_index: usize,
+    pub(crate) tumor_min_alt_count: u32,
+    pub(crate) tumor_min_alt_fraction: f64,
+    pub(crate) normal_max_alt_count: u32,
+    pub(crate) normal_max_alt_fraction: f64,
+    pub(crate) normal_min_depth: Option<u32>,
 }
 
 pub(crate) fn base_index(base: u8) -> Option<usize> {
