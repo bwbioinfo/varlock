@@ -136,6 +136,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         &output,
         &prepared.ref_names,
         &prepared.sample_names,
+        prepared.paired.as_ref(),
         all_counts,
     )?;
 

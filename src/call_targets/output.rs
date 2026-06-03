@@ -20,7 +20,7 @@ use noodles_tabix as tabix;
 use crate::{CallTargetsArgs, ExecutionContext, IndexType, log_verbose};
 
 use super::reference::{FastaIndex, open_fasta_index};
-use super::types::{SiteCounts, SiteKey, base_index};
+use super::types::{PairedCallingConfig, SiteCounts, SiteKey, base_index};
 
 pub(crate) struct CallTargetsOutputState {
     writer: bgzf::io::Writer<File>,
@@ -50,6 +50,7 @@ pub(crate) fn write_call_targets_output(
     output_path: &Path,
     ref_names: &[String],
     sample_names: &[String],
+    paired: Option<&PairedCallingConfig>,
     counts: BTreeMap<SiteKey, SiteCounts>,
 ) -> Result<()> {
     let total_sites = counts.len();
@@ -61,6 +62,7 @@ pub(crate) fn write_call_targets_output(
         output_path,
         ref_names,
         sample_names,
+        paired,
     )?;
     write_call_targets_output_chunk(
         &mut state,
@@ -68,6 +70,7 @@ pub(crate) fn write_call_targets_output(
         ctx,
         label,
         ref_names,
+        paired,
         counts,
         Some(total_sites),
     )?;
@@ -82,6 +85,7 @@ pub(crate) fn begin_call_targets_output(
     output_path: &Path,
     ref_names: &[String],
     sample_names: &[String],
+    paired: Option<&PairedCallingConfig>,
 ) -> Result<CallTargetsOutputState> {
     let stage_started = Instant::now();
     let fasta = open_fasta_index(prepared_reference)?;
@@ -103,7 +107,7 @@ pub(crate) fn begin_call_targets_output(
     let output_file = File::create(output_path)
         .with_context(|| format!("failed to create output {}", output_path.display()))?;
     let mut writer = bgzf::io::writer::Builder::default().build_from_writer(output_file);
-    write_vcf_header(&mut writer, args, ref_names, sample_names, &fasta)?;
+    write_vcf_header(&mut writer, args, ref_names, sample_names, &fasta, paired)?;
 
     let csi_indexer = matches!(args.index_type, IndexType::Csi)
         .then(binning_index::Indexer::<BinnedIndex>::default);
@@ -140,6 +144,7 @@ pub(crate) fn write_call_targets_output_chunk(
     ctx: &ExecutionContext,
     label: &str,
     ref_names: &[String],
+    paired: Option<&PairedCallingConfig>,
     counts: BTreeMap<SiteKey, SiteCounts>,
     total_sites: Option<usize>,
 ) -> Result<()> {
@@ -195,6 +200,19 @@ pub(crate) fn write_call_targets_output_chunk(
                 .saturating_add(elapsed_ns(filter_eval_started));
             continue;
         }
+        let paired_call = match paired {
+            Some(config) => match evaluate_paired_call(config, alt_base, &site_counts)? {
+                Some(call) => Some(call),
+                None => {
+                    state.write_metrics.filter_eval_ns = state
+                        .write_metrics
+                        .filter_eval_ns
+                        .saturating_add(elapsed_ns(filter_eval_started));
+                    continue;
+                }
+            },
+            None => None,
+        };
         state.write_metrics.filter_eval_ns = state
             .write_metrics
             .filter_eval_ns
@@ -209,6 +227,7 @@ pub(crate) fn write_call_targets_output_chunk(
             ref_base,
             alt_base,
             total_dp,
+            paired_call.as_ref(),
             &site_counts,
         )?;
         state.written_variants += 1;
@@ -362,6 +381,7 @@ fn write_vcf_header<W: Write>(
     ref_names: &[String],
     sample_names: &[String],
     fasta: &FastaIndex,
+    paired: Option<&PairedCallingConfig>,
 ) -> Result<()> {
     let reference = args
         .reference
@@ -377,6 +397,40 @@ fn write_vcf_header<W: Write>(
         writer,
         "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total Depth\">"
     )?;
+    if paired.is_some() {
+        writeln!(
+            writer,
+            "##INFO=<ID=PAIR,Number=1,Type=String,Description=\"Paired tumor/normal sample names\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Variant passed paired tumor/normal filters\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=TUMOR_AF,Number=1,Type=Float,Description=\"Tumor alternate allele fraction\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=NORMAL_AF,Number=1,Type=Float,Description=\"Normal alternate allele fraction\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=TUMOR_ALT_COUNT,Number=1,Type=Integer,Description=\"Tumor alternate allele count\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=NORMAL_ALT_COUNT,Number=1,Type=Integer,Description=\"Normal alternate allele count\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=TUMOR_DP,Number=1,Type=Integer,Description=\"Tumor read depth\">"
+        )?;
+        writeln!(
+            writer,
+            "##INFO=<ID=NORMAL_DP,Number=1,Type=Integer,Description=\"Normal read depth\">"
+        )?;
+    }
     writeln!(
         writer,
         "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">"
@@ -407,13 +461,28 @@ fn write_vcf_record<W: Write>(
     ref_base: u8,
     alt_base: u8,
     total_dp: u32,
+    paired_call: Option<&PairedCallInfo>,
     site_counts: &SiteCounts,
 ) -> Result<()> {
     write!(
         writer,
-        "{}\t{}\t.\t{}\t{}\t.\tPASS\tDP={}\tGT:DP:AD",
+        "{}\t{}\t.\t{}\t{}\t.\tPASS\tDP={}",
         chrom, pos, ref_base as char, alt_base as char, total_dp
     )?;
+    if let Some(call) = paired_call {
+        write!(
+            writer,
+            ";PAIR={};SOMATIC;TUMOR_AF={:.6};NORMAL_AF={:.6};TUMOR_ALT_COUNT={};NORMAL_ALT_COUNT={};TUMOR_DP={};NORMAL_DP={}",
+            call.pair,
+            call.tumor_af,
+            call.normal_af,
+            call.tumor_alt_count,
+            call.normal_alt_count,
+            call.tumor_dp,
+            call.normal_dp
+        )?;
+    }
+    write!(writer, "\tGT:DP:AD")?;
     let ref_idx = base_index(ref_base).context("invalid reference base")?;
     let alt_idx = base_index(alt_base).context("invalid alt base")?;
 
@@ -434,6 +503,78 @@ fn write_vcf_record<W: Write>(
     }
     writeln!(writer)?;
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct PairedCallInfo {
+    pair: String,
+    tumor_dp: u32,
+    tumor_alt_count: u32,
+    tumor_af: f64,
+    normal_dp: u32,
+    normal_alt_count: u32,
+    normal_af: f64,
+}
+
+fn evaluate_paired_call(
+    config: &PairedCallingConfig,
+    alt_base: u8,
+    site_counts: &SiteCounts,
+) -> Result<Option<PairedCallInfo>> {
+    let alt_idx = base_index(alt_base).context("invalid paired alt base")?;
+    let tumor = site_counts
+        .per_sample
+        .get(config.tumor_index)
+        .context("paired tumor sample index out of range")?;
+    let normal = site_counts
+        .per_sample
+        .get(config.normal_index)
+        .context("paired normal sample index out of range")?;
+
+    let tumor_dp = tumor.iter().sum::<u32>();
+    let normal_dp = normal.iter().sum::<u32>();
+    if config
+        .normal_min_depth
+        .is_some_and(|min_depth| normal_dp < min_depth)
+    {
+        return Ok(None);
+    }
+
+    let tumor_alt_count = tumor[alt_idx];
+    let normal_alt_count = normal[alt_idx];
+    let tumor_af = allele_fraction(tumor_alt_count, tumor_dp);
+    let normal_af = allele_fraction(normal_alt_count, normal_dp);
+
+    if tumor_alt_count < config.tumor_min_alt_count {
+        return Ok(None);
+    }
+    if tumor_af < config.tumor_min_alt_fraction {
+        return Ok(None);
+    }
+    if normal_alt_count > config.normal_max_alt_count {
+        return Ok(None);
+    }
+    if normal_af > config.normal_max_alt_fraction {
+        return Ok(None);
+    }
+
+    Ok(Some(PairedCallInfo {
+        pair: format!("{}|{}", config.roles.tumor, config.roles.normal),
+        tumor_dp,
+        tumor_alt_count,
+        tumor_af,
+        normal_dp,
+        normal_alt_count,
+        normal_af,
+    }))
+}
+
+fn allele_fraction(alt_count: u32, depth: u32) -> f64 {
+    if depth == 0 {
+        0.0
+    } else {
+        alt_count as f64 / depth as f64
+    }
 }
 
 fn choose_alt(ref_base: u8, counts: &SiteCounts, min_alt_count: u32) -> Result<(Option<u8>, u32)> {
@@ -480,11 +621,27 @@ fn elapsed_ns(start: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::SiteCounts;
-    use super::choose_alt;
+    use super::super::types::{PairedCallingConfig, PairedSampleRoles, SiteCounts};
+    use super::{choose_alt, evaluate_paired_call};
 
     fn counts(per_sample: Vec<[u32; 4]>) -> SiteCounts {
         SiteCounts { per_sample }
+    }
+
+    fn paired_config() -> PairedCallingConfig {
+        PairedCallingConfig {
+            roles: PairedSampleRoles {
+                tumor: "tumor".to_string(),
+                normal: "normal".to_string(),
+            },
+            tumor_index: 0,
+            normal_index: 1,
+            tumor_min_alt_count: 3,
+            tumor_min_alt_fraction: 0.2,
+            normal_max_alt_count: 1,
+            normal_max_alt_fraction: 0.05,
+            normal_min_depth: Some(10),
+        }
     }
 
     #[test]
@@ -534,5 +691,47 @@ mod tests {
         let (alt, count) = choose_alt(b'C', &c, 1).unwrap();
         assert_eq!(alt, Some(b'A'));
         assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn evaluate_paired_call_accepts_tumor_supported_normal_clean_alt() {
+        let c = counts(vec![[10, 4, 0, 0], [20, 1, 0, 0]]);
+        let call = evaluate_paired_call(&paired_config(), b'C', &c)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(call.tumor_dp, 14);
+        assert_eq!(call.tumor_alt_count, 4);
+        assert!((call.tumor_af - 0.285714).abs() < 0.000001);
+        assert_eq!(call.normal_dp, 21);
+        assert_eq!(call.normal_alt_count, 1);
+        assert!((call.normal_af - 0.047619).abs() < 0.000001);
+    }
+
+    #[test]
+    fn evaluate_paired_call_rejects_weak_tumor_or_contaminated_normal() {
+        let weak_tumor = counts(vec![[10, 2, 0, 0], [20, 0, 0, 0]]);
+        assert!(
+            evaluate_paired_call(&paired_config(), b'C', &weak_tumor)
+                .unwrap()
+                .is_none()
+        );
+
+        let contaminated_normal = counts(vec![[10, 4, 0, 0], [20, 2, 0, 0]]);
+        assert!(
+            evaluate_paired_call(&paired_config(), b'C', &contaminated_normal)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn evaluate_paired_call_rejects_low_normal_depth_when_requested() {
+        let c = counts(vec![[10, 4, 0, 0], [5, 0, 0, 0]]);
+        assert!(
+            evaluate_paired_call(&paired_config(), b'C', &c)
+                .unwrap()
+                .is_none()
+        );
     }
 }
