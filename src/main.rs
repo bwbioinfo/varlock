@@ -10,6 +10,7 @@ mod annotate;
 mod call_targets;
 mod fasta_prep;
 mod filter;
+mod vcf;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};

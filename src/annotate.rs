@@ -1,32 +1,25 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
-    hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
-use flate2::read::MultiGzDecoder;
 use noodles_bgzf as bgzf;
-use noodles_core::{Position, Region};
-use noodles_csi::{
-    self as csi,
-    binning_index::{
-        self,
-        index::reference_sequence::bin::Chunk,
-        index::reference_sequence::index::BinnedIndex,
-        index::{
-            Header as TabixHeader,
-            header::{Format as TabixFormat, ReferenceSequenceNames},
-        },
-    },
-};
+use noodles_core::Region;
+use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Chunk};
 use noodles_tabix as tabix;
 
 use crate::call_targets::reference::{FastaIndex, open_fasta_index};
-use crate::{AnnotateArgs, ExecutionContext, IndexType, log_verbose};
+use crate::{
+    AnnotateArgs, ExecutionContext, IndexType, log_verbose,
+    vcf::{
+        IndexRecord, OutputIndex, VariantKey, csi_index_path, open_text_reader, parse_info_string,
+        tabix_index_path, variant_keys_from_fields as raw_variant_keys_from_fields,
+    },
+};
 
 #[derive(Clone, Debug)]
 struct DatabaseSpec {
@@ -38,32 +31,6 @@ struct DatabaseSpec {
 struct FieldMapping {
     src: String,
     dest: String,
-}
-
-#[derive(Clone, Debug, Eq)]
-struct VariantKey {
-    chrom: String,
-    pos: String,
-    ref_allele: String,
-    alt_allele: String,
-}
-
-impl PartialEq for VariantKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.chrom == other.chrom
-            && self.pos == other.pos
-            && self.ref_allele == other.ref_allele
-            && self.alt_allele == other.alt_allele
-    }
-}
-
-impl Hash for VariantKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.chrom.hash(state);
-        self.pos.hash(state);
-        self.ref_allele.hash(state);
-        self.alt_allele.hash(state);
-    }
 }
 
 type AnnotationValues = BTreeMap<String, String>;
@@ -491,9 +458,7 @@ fn annotate_vcf(
         } else if trimmed.starts_with('#') {
             writeln!(writer, "{trimmed}")?;
         } else {
-            let Some(index_record) = index_record_from_line(trimmed)? else {
-                bail!("invalid VCF record for indexing: {trimmed}");
-            };
+            let index_record = IndexRecord::from_line(trimmed)?;
             let chunk_start = writer.virtual_position();
             let annotated = annotate_record_line(trimmed, lookup, normalizer.as_deref_mut())?;
             writeln!(writer, "{annotated}")?;
@@ -573,147 +538,6 @@ fn annotate_record_line(
     Ok(fields.join("\t"))
 }
 
-#[derive(Clone, Debug)]
-struct IndexRecord {
-    chrom: String,
-    position: Position,
-}
-
-enum OutputIndex {
-    Csi {
-        indexer: binning_index::Indexer<BinnedIndex>,
-        reference_ids: HashMap<String, usize>,
-        reference_names: Vec<String>,
-    },
-    Tbi(tabix::index::Indexer),
-}
-
-impl OutputIndex {
-    fn new(index_type: IndexType) -> Self {
-        match index_type {
-            IndexType::Csi => Self::Csi {
-                indexer: binning_index::Indexer::<BinnedIndex>::default(),
-                reference_ids: HashMap::new(),
-                reference_names: Vec::new(),
-            },
-            IndexType::Tbi => {
-                let mut indexer = tabix::index::Indexer::default();
-                let header = TabixHeader::builder()
-                    .set_format(TabixFormat::Vcf)
-                    .set_reference_sequence_name_index(0)
-                    .set_start_position_index(1)
-                    .set_end_position_index(None)
-                    .set_line_comment_prefix(b'#')
-                    .set_line_skip_count(0)
-                    .build();
-                indexer.set_header(header);
-                Self::Tbi(indexer)
-            }
-        }
-    }
-
-    fn add_record(&mut self, record: &IndexRecord, chunk: Chunk) -> Result<()> {
-        match self {
-            Self::Csi {
-                indexer,
-                reference_ids,
-                reference_names,
-            } => {
-                let reference_sequence_id =
-                    reference_id_for(reference_ids, reference_names, &record.chrom);
-                indexer
-                    .add_record(
-                        Some((
-                            reference_sequence_id,
-                            record.position,
-                            record.position,
-                            true,
-                        )),
-                        chunk,
-                    )
-                    .context("failed to update CSI index")?;
-            }
-            Self::Tbi(indexer) => indexer
-                .add_record(&record.chrom, record.position, record.position, chunk)
-                .context("failed to update TBI index")?,
-        }
-        Ok(())
-    }
-
-    fn write(self, output: &Path) -> Result<()> {
-        match self {
-            Self::Csi {
-                indexer,
-                reference_names,
-                ..
-            } => {
-                let mut csi_reference_names = ReferenceSequenceNames::new();
-                for name in &reference_names {
-                    csi_reference_names.insert(name.as_str().into());
-                }
-                let header = TabixHeader::builder()
-                    .set_format(TabixFormat::Vcf)
-                    .set_reference_sequence_name_index(0)
-                    .set_start_position_index(1)
-                    .set_end_position_index(None)
-                    .set_line_comment_prefix(b'#')
-                    .set_line_skip_count(0)
-                    .set_reference_sequence_names(csi_reference_names)
-                    .build();
-                let index = indexer.set_header(header).build(reference_names.len());
-                let index_path = index_path(output, "csi")?;
-                let index_file = File::create(&index_path)
-                    .with_context(|| format!("failed to create index {}", index_path.display()))?;
-                let mut writer = noodles_csi::io::Writer::new(index_file);
-                writer
-                    .write_index(&index)
-                    .context("failed to write CSI index")?;
-            }
-            Self::Tbi(indexer) => {
-                let index = indexer.build();
-                let index_path = index_path(output, "tbi")?;
-                let index_file = File::create(&index_path)
-                    .with_context(|| format!("failed to create index {}", index_path.display()))?;
-                let mut writer = tabix::io::Writer::new(index_file);
-                writer
-                    .write_index(&index)
-                    .context("failed to write TBI index")?;
-            }
-        }
-        Ok(())
-    }
-}
-
-fn reference_id_for(
-    reference_ids: &mut HashMap<String, usize>,
-    reference_names: &mut Vec<String>,
-    chrom: &str,
-) -> usize {
-    if let Some(id) = reference_ids.get(chrom) {
-        *id
-    } else {
-        let id = reference_names.len();
-        reference_ids.insert(chrom.to_string(), id);
-        reference_names.push(chrom.to_string());
-        id
-    }
-}
-
-fn index_record_from_line(line: &str) -> Result<Option<IndexRecord>> {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() < 8 {
-        bail!("invalid VCF record with fewer than 8 fields: {line}");
-    }
-    let pos = fields[1]
-        .parse::<usize>()
-        .with_context(|| format!("invalid VCF position {:?}", fields[1]))?;
-    let position = Position::try_from(pos).context("invalid VCF position for indexing")?;
-    Ok(Some(IndexRecord {
-        chrom: fields[0].to_string(),
-        position,
-    }))
-}
-
 fn query_indexed_database<I>(
     db_name: &str,
     mappings: &[FieldMapping],
@@ -761,7 +585,7 @@ fn parse_database_records(
         return Ok(Vec::new());
     }
     let alt_count = keys.len();
-    let info = parse_info(fields[7]);
+    let info = parse_info_string(fields[7]);
     let mut records = Vec::new();
     for (alt_index, key) in keys.into_iter().enumerate() {
         let mut values = AnnotationValues::new();
@@ -784,33 +608,8 @@ fn variant_keys_from_fields(
     fields: &[&str],
     mut normalizer: Option<&mut VariantNormalizer>,
 ) -> Result<Vec<VariantKey>> {
-    let Some(chrom) = fields.first() else {
-        return Ok(Vec::new());
-    };
-    let Some(pos) = fields.get(1) else {
-        return Ok(Vec::new());
-    };
-    let Some(ref_allele) = fields.get(3) else {
-        return Ok(Vec::new());
-    };
-    let Some(alt_field) = fields.get(4) else {
-        return Ok(Vec::new());
-    };
-    if *alt_field == "." || alt_field.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let mut keys = Vec::new();
-    for alt in alt_field
-        .split(',')
-        .filter(|alt| !alt.is_empty() && *alt != ".")
-    {
-        let key = VariantKey {
-            chrom: (*chrom).to_string(),
-            pos: (*pos).to_string(),
-            ref_allele: (*ref_allele).to_string(),
-            alt_allele: alt.to_string(),
-        };
+    for key in raw_variant_keys_from_fields(fields) {
         let key = if let Some(normalizer) = normalizer.as_deref_mut() {
             normalizer.normalize_key(key)?
         } else {
@@ -834,70 +633,18 @@ fn annotation_value_for_alt(value: &str, alt_count: usize, alt_index: usize) -> 
     }
 }
 
-fn parse_info(info: &str) -> HashMap<&str, String> {
-    let mut out = HashMap::new();
-    if info == "." || info.is_empty() {
-        return out;
-    }
-    for item in info.split(';') {
-        if item.is_empty() {
-            continue;
-        }
-        if let Some((key, value)) = item.split_once('=') {
-            out.insert(key, value.to_string());
-        } else {
-            out.insert(item, "1".to_string());
-        }
-    }
-    out
-}
-
-fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead>> {
-    let file = File::open(path)?;
-    if is_gz_path(path) {
-        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
-    }
-}
-
-fn is_gz_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "gz" | "bgz" | "bgzf"))
-        .unwrap_or(false)
-}
-
-fn tabix_index_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!(
-        "{}.tbi",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-    ))
-}
-
-fn csi_index_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!(
-        "{}.csi",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-    ))
-}
-
-fn index_path(output: &Path, ext: &str) -> Result<PathBuf> {
-    output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| output.with_file_name(format!("{name}.{ext}")))
-        .context("invalid output path")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
+    use noodles_csi::binning_index::{
+        self,
+        index::reference_sequence::index::BinnedIndex,
+        index::{
+            Header as TabixHeader,
+            header::{Format as TabixFormat, ReferenceSequenceNames},
+        },
+    };
     use std::io::{Read, Write};
     use tempfile::tempdir;
 
@@ -1296,7 +1043,7 @@ mod tests {
             if line.starts_with('#') {
                 writeln!(writer, "{line}")?;
             } else {
-                let record = index_record_from_line(line)?.context("missing record")?;
+                let record = IndexRecord::from_line(line)?;
                 let chunk_start = writer.virtual_position();
                 writeln!(writer, "{line}")?;
                 let chunk_end = writer.virtual_position();
@@ -1327,9 +1074,9 @@ mod tests {
             if line.starts_with('#') {
                 writeln!(writer, "{line}")?;
             } else {
-                let record = index_record_from_line(line)?.context("missing record")?;
+                let record = IndexRecord::from_line(line)?;
                 let reference_sequence_id =
-                    reference_id_for(&mut reference_ids, &mut reference_names, &record.chrom);
+                    test_reference_id_for(&mut reference_ids, &mut reference_names, &record.chrom);
                 let chunk_start = writer.virtual_position();
                 writeln!(writer, "{line}")?;
                 let chunk_end = writer.virtual_position();
@@ -1363,6 +1110,21 @@ mod tests {
         let mut index_writer = csi::io::Writer::new(File::create(csi_index_path(path))?);
         index_writer.write_index(&index)?;
         Ok(())
+    }
+
+    fn test_reference_id_for(
+        reference_ids: &mut HashMap<String, usize>,
+        reference_names: &mut Vec<String>,
+        chrom: &str,
+    ) -> usize {
+        if let Some(id) = reference_ids.get(chrom) {
+            *id
+        } else {
+            let id = reference_names.len();
+            reference_ids.insert(chrom.to_string(), id);
+            reference_names.push(chrom.to_string());
+            id
+        }
     }
 
     fn write_reference_with_fai(path: &Path, name: &str, sequence: &str) -> Result<()> {
