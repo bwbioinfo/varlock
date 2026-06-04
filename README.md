@@ -514,6 +514,25 @@ Design decisions to settle before implementation:
 - whether missing genotypes count as absence
 - projected VCF output vs tabular summaries
 
+Planned implementation phases:
+
+1. Factor shared VCF text utilities from `annotate` and `filter`: text/gzip
+   readers, bgzip/indexed VCF writers, `VariantKey`, multi-ALT key expansion,
+   INFO parsing, header sample parsing, and FORMAT/sample lookup.
+2. Add exact-key two-file operations:
+   `varlock intersect --left LEFT --right RIGHT --mode shared|left-only|right-only`.
+   Default identity is `(CHROM, POS, REF, ALT)`, output preserves records from
+   the emitted side, and membership is record presence rather than genotype
+   support.
+3. Add one-file multi-sample operations:
+   `--input cohort.vcf.gz --left-samples a,b --right-samples c,d`. In this mode,
+   sample support is genotype-aware by default: non-reference `FORMAT/GT` means
+   present; missing genotypes count as absent.
+4. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
+   manifest form for `all-shared`, `any-shared`, and `set-diff A-B`.
+5. Add matching-mode flags: `--reference` for normalized allele keys,
+   `--site-only`, and explicit `--genotype-aware`.
+
 ### Annotation Follow-Ups
 
 The annotation command supports exact and reference-normalized VCF-like database
