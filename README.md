@@ -415,6 +415,22 @@ varlock filter \
 For comma-valued INFO fields, `--max-info FIELD=VALUE` requires every numeric
 non-missing value in the field to be at or below the threshold.
 
+For more complex INFO predicates, use `--expr`. Repeated expressions are
+combined with logical AND:
+
+```bash
+varlock filter \
+  --input calls.annotated.vcf.gz \
+  --expr "gnomAD_AF < 0.01 && DP >= 20" \
+  --expr "CLNSIG != 'Benign' && missing(COMMON)" \
+  --output calls.expr_filtered.vcf.gz
+```
+
+The first-pass expression language supports INFO field names, numeric and quoted
+string literals, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`,
+parentheses, and `missing(FIELD)`. A bare INFO field name is true when that
+field is present, so `SOMATIC && !COMMON` is valid.
+
 Sample-aware filters inspect `FORMAT` values for named samples:
 
 ```bash

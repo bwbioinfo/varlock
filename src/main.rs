@@ -130,6 +130,10 @@ pub struct FilterArgs {
     #[arg(long = "max-info", value_name = "FIELD=VALUE")]
     pub max_info: Vec<String>,
 
+    /// Keep records matching an INFO expression; repeatable and combined with AND
+    #[arg(long = "expr", value_name = "EXPR")]
+    pub expressions: Vec<String>,
+
     /// Define a sample group as NAME=SAMPLE[,SAMPLE...]; repeat for multiple groups
     #[arg(long = "sample-group", value_name = "NAME=SAMPLE[,SAMPLE...]")]
     pub sample_groups: Vec<String>,

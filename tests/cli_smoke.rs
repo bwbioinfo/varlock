@@ -81,6 +81,7 @@ fn filter_help_lists_info_predicates() -> Result<()> {
     assert!(stdout.contains("--require-info"));
     assert!(stdout.contains("--exclude-info"));
     assert!(stdout.contains("--max-info"));
+    assert!(stdout.contains("--expr"));
     assert!(stdout.contains("--sample-group"));
     assert!(stdout.contains("--sample-has-alt"));
     assert!(stdout.contains("--group-all-min-dp"));
