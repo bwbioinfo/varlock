@@ -621,8 +621,22 @@ fn elapsed_ns(start: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "wgpu")]
+    use super::super::types::SiteKey;
     use super::super::types::{PairedCallingConfig, PairedSampleRoles, SiteCounts};
+    #[cfg(feature = "wgpu")]
+    use super::write_call_targets_output;
     use super::{choose_alt, evaluate_paired_call};
+    #[cfg(feature = "wgpu")]
+    use crate::{CallTargetsArgs, ExecutionContext, IndexType};
+    #[cfg(feature = "wgpu")]
+    use anyhow::Result;
+    #[cfg(feature = "wgpu")]
+    use noodles_bgzf as bgzf;
+    #[cfg(feature = "wgpu")]
+    use std::{collections::BTreeMap, fs::File, io::Read};
+    #[cfg(feature = "wgpu")]
+    use tempfile::tempdir;
 
     fn counts(per_sample: Vec<[u32; 4]>) -> SiteCounts {
         SiteCounts { per_sample }
@@ -641,6 +655,30 @@ mod tests {
             normal_max_alt_count: 1,
             normal_max_alt_fraction: 0.05,
             normal_min_depth: Some(10),
+        }
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn call_targets_args(reference: std::path::PathBuf) -> CallTargetsArgs {
+        CallTargetsArgs {
+            inputs: Vec::new(),
+            bamlist: None,
+            reference: Some(reference),
+            targets: None,
+            output: None,
+            rg_map: None,
+            index_type: IndexType::Csi,
+            min_mapq: 20,
+            min_baseq: 20,
+            min_alt_count: 1,
+            min_alt_fraction: 0.0,
+            pair: Some("tumor=tumor,normal=normal".to_string()),
+            tumor_min_alt_count: 3,
+            tumor_min_alt_fraction: 0.2,
+            normal_max_alt_count: 1,
+            normal_max_alt_fraction: 0.05,
+            normal_min_depth: Some(10),
+            max_depth: 100_000,
         }
     }
 
@@ -733,5 +771,53 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn gpu_output_path_writes_paired_headers_and_info() -> Result<()> {
+        let dir = tempdir()?;
+        let reference = dir.path().join("ref.fa");
+        let output = dir.path().join("gpu.paired.vcf.gz");
+        std::fs::write(&reference, ">chr1\nACGTACGT\n")?;
+        std::fs::write(reference.with_extension("fa.fai"), "chr1\t8\t6\t8\t9\n")?;
+
+        let mut site_counts = BTreeMap::new();
+        site_counts.insert(
+            SiteKey {
+                reference_sequence_id: 0,
+                position: 2,
+            },
+            counts(vec![[0, 10, 4, 0], [0, 20, 1, 0]]),
+        );
+
+        let args = call_targets_args(reference.clone());
+        let ctx = ExecutionContext {
+            verbose: 0,
+            threads: 1,
+        };
+        write_call_targets_output(
+            &args,
+            &ctx,
+            "call_targets_gpu",
+            &reference,
+            &output,
+            &["chr1".to_string()],
+            &["tumor".to_string(), "normal".to_string()],
+            Some(&paired_config()),
+            site_counts,
+        )?;
+
+        let mut reader = bgzf::io::Reader::new(File::open(output)?);
+        let mut text = String::new();
+        reader.read_to_string(&mut text)?;
+
+        assert!(text.contains("##INFO=<ID=SOMATIC"));
+        assert!(text.contains("##INFO=<ID=TUMOR_AF"));
+        assert!(text.contains(
+            "chr1\t2\t.\tC\tG\t.\tPASS\tDP=35;PAIR=tumor|normal;SOMATIC;TUMOR_AF=0.285714;NORMAL_AF=0.047619;TUMOR_ALT_COUNT=4;NORMAL_ALT_COUNT=1;TUMOR_DP=14;NORMAL_DP=21\tGT:DP:AD\t0/1:14:10,4\t0/1:21:20,1"
+        ));
+        assert!(dir.path().join("gpu.paired.vcf.gz.csi").exists());
+        Ok(())
     }
 }

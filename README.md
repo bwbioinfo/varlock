@@ -155,6 +155,51 @@ site. The selected ALT is the highest-count non-reference A/C/G/T base after
 summing counts across samples. Per-sample genotype fields are still written for
 the selected ALT.
 
+## Paired Calling
+
+Use `--pair tumor=SAMPLE,normal=SAMPLE` to filter calls through one tumor/normal
+pair after the global ALT has been selected. The tumor and normal names must
+match sample names from BAM `RG/SM` tags or `--rg-map`.
+
+```bash
+varlock call-targets \
+  --input tumor.bam \
+  --input normal.bam \
+  --reference hg38/hg38.fa \
+  --targets targets.bed \
+  --pair tumor=Tumor,normal=Normal \
+  --tumor-min-alt-count 3 \
+  --tumor-min-alt-fraction 0.05 \
+  --normal-max-alt-count 0 \
+  --normal-max-alt-fraction 0.0 \
+  --normal-min-depth 10 \
+  --output paired.calls.vcf.gz
+```
+
+Paired output keeps all samples in `FORMAT/GT:DP:AD` and adds paired INFO fields
+to records that pass:
+
+- `PAIR` - tumor and normal sample names.
+- `SOMATIC` - flag indicating the selected ALT passed paired filters.
+- `TUMOR_AF`, `NORMAL_AF` - selected ALT allele fractions.
+- `TUMOR_ALT_COUNT`, `NORMAL_ALT_COUNT` - selected ALT counts.
+- `TUMOR_DP`, `NORMAL_DP` - tumor and normal depths.
+
+GPU calling accepts the same paired options and uses the same output
+classification:
+
+```bash
+varlock call-targets-gpu \
+  --input tumor.bam \
+  --input normal.bam \
+  --reference hg38/hg38.fa \
+  --targets targets.bed \
+  --pair tumor=Tumor,normal=Normal \
+  --tumor-min-alt-count 3 \
+  --normal-max-alt-count 0 \
+  --output paired.gpu.calls.vcf.gz
+```
+
 ## Output
 
 Output is a bgzipped VCF:
