@@ -471,8 +471,9 @@ by default; use `--index-type tbi` to write a tabix index instead.
 
 ## VCF Intersection And Difference
 
-`intersect` performs exact allele-key set operations between two VCFs. The first
-implementation matches variants by `(CHROM, POS, REF, ALT)` and treats record
+`intersect` performs exact allele-key set operations between two VCFs, or
+genotype-aware set operations between two sample groups in one multi-sample VCF.
+Two-file mode matches variants by `(CHROM, POS, REF, ALT)` and treats record
 presence as support. Multi-ALT records are split internally for matching; output
 preserves the original record from the emitted side.
 
@@ -507,6 +508,21 @@ varlock intersect \
 Output records include `INFO/VARLOCK_SET=both`, `left`, or `right` and are
 written as bgzipped VCF with a CSI index by default.
 
+One-file sample-group mode compares genotype support between explicit sample
+groups. A sample supports a variant when `FORMAT/GT` contains any non-reference
+allele. Missing genotypes such as `./.` or `.|.`, missing alleles, and records
+without `FORMAT/GT` count as absence. Output preserves all input samples and adds
+`INFO/VARLOCK_LEFT_SUPPORT` and `INFO/VARLOCK_RIGHT_SUPPORT`.
+
+```bash
+varlock intersect \
+  --input cohort.vcf.gz \
+  --left-samples tumor_a,tumor_b \
+  --right-samples normal_a,normal_b \
+  --mode left-only \
+  --output tumor_group_only.vcf.gz
+```
+
 ## Roadmap
 
 Planned features are tracked with `bd` issues.
@@ -516,17 +532,9 @@ Planned features are tracked with `bd` issues.
 Implemented:
 
 - two-file exact-key `shared`, `left-only`, and `right-only`
+- one-file multi-sample group `shared`, `left-only`, and `right-only`
 
 Planned examples:
-
-```bash
-varlock intersect \
-  --input cohort.vcf.gz \
-  --left-samples a,b \
-  --right-samples c,d \
-  --mode left-only \
-  --output ab_not_cd.vcf.gz
-```
 
 ```bash
 varlock intersect \
@@ -546,13 +554,9 @@ Design decisions to settle before implementation:
 
 Planned implementation phases:
 
-1. Add one-file multi-sample operations:
-   `--input cohort.vcf.gz --left-samples a,b --right-samples c,d`. In this mode,
-   sample support is genotype-aware by default: non-reference `FORMAT/GT` means
-   present; missing genotypes count as absent.
-2. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
+1. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
    manifest form for `all-shared`, `any-shared`, and `set-diff A-B`.
-3. Add matching-mode flags: `--reference` for normalized allele keys,
+2. Add matching-mode flags: `--reference` for normalized allele keys,
    `--site-only`, and explicit `--genotype-aware`.
 
 ### Annotation Follow-Ups

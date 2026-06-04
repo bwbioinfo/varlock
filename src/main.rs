@@ -78,7 +78,7 @@ enum Command {
     /// Filter VCF records using INFO predicates
     Filter(FilterArgs),
 
-    /// Intersect or subtract variants across two VCFs
+    /// Intersect or subtract variants across VCFs or sample groups
     Intersect(IntersectArgs),
 }
 
@@ -176,11 +176,23 @@ pub struct FilterArgs {
 pub struct IntersectArgs {
     /// Left VCF path (plain or .gz)
     #[arg(long = "left", value_name = "VCF")]
-    pub left: PathBuf,
+    pub left: Option<PathBuf>,
 
     /// Right VCF path (plain or .gz)
     #[arg(long = "right", value_name = "VCF")]
-    pub right: PathBuf,
+    pub right: Option<PathBuf>,
+
+    /// One-file multi-sample VCF path (plain or .gz)
+    #[arg(long = "input", value_name = "VCF")]
+    pub input: Option<PathBuf>,
+
+    /// Left sample group for one-file mode, as SAMPLE[,SAMPLE...]
+    #[arg(long = "left-samples", value_name = "SAMPLES")]
+    pub left_samples: Option<String>,
+
+    /// Right sample group for one-file mode, as SAMPLE[,SAMPLE...]
+    #[arg(long = "right-samples", value_name = "SAMPLES")]
+    pub right_samples: Option<String>,
 
     /// Set operation mode
     #[arg(long = "mode", value_name = "MODE", value_enum)]

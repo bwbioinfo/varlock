@@ -97,6 +97,9 @@ fn intersect_help_lists_two_file_modes() -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--left"));
     assert!(stdout.contains("--right"));
+    assert!(stdout.contains("--input"));
+    assert!(stdout.contains("--left-samples"));
+    assert!(stdout.contains("--right-samples"));
     assert!(stdout.contains("--mode"));
     assert!(stdout.contains("possible values: shared, left-only, right-only"));
     Ok(())
