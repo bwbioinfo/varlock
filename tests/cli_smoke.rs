@@ -32,6 +32,7 @@ fn top_level_help_lists_core_commands() -> Result<()> {
     assert!(stdout.contains("call-targets"));
     assert!(stdout.contains("annotate"));
     assert!(stdout.contains("filter"));
+    assert!(stdout.contains("intersect"));
     Ok(())
 }
 
@@ -85,6 +86,19 @@ fn filter_help_lists_info_predicates() -> Result<()> {
     assert!(stdout.contains("--sample-group"));
     assert!(stdout.contains("--sample-has-alt"));
     assert!(stdout.contains("--group-all-min-dp"));
+    Ok(())
+}
+
+#[test]
+fn intersect_help_lists_two_file_modes() -> Result<()> {
+    let output = run_varlock(&["intersect", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--left"));
+    assert!(stdout.contains("--right"));
+    assert!(stdout.contains("--mode"));
+    assert!(stdout.contains("possible values: shared, left-only, right-only"));
     Ok(())
 }
 

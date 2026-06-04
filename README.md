@@ -18,6 +18,7 @@ Current subcommands:
   with the `wgpu` feature.
 - `annotate` - VCF annotation from VCF-like databases.
 - `filter` - INFO-based VCF filtering.
+- `intersect` - exact-key VCF intersection and difference.
 
 ## Build
 
@@ -40,6 +41,7 @@ cargo run -- call-targets --help
 cargo run --features wgpu -- call-targets-gpu --help
 cargo run -- annotate --help
 cargo run -- filter --help
+cargo run -- intersect --help
 ```
 
 ## Inputs
@@ -467,19 +469,14 @@ Available first-pass sample predicates are:
 Filter output preserves all input samples and is bgzipped VCF with a CSI index
 by default; use `--index-type tbi` to write a tabix index instead.
 
-## Roadmap
+## VCF Intersection And Difference
 
-Planned features are tracked with `bd` issues.
+`intersect` performs exact allele-key set operations between two VCFs. The first
+implementation matches variants by `(CHROM, POS, REF, ALT)` and treats record
+presence as support. Multi-ALT records are split internally for matching; output
+preserves the original record from the emitted side.
 
-### Variant Intersection And Difference
-
-Planned command family for set operations over VCFs:
-
-- two single-sample VCFs
-- one multi-sample VCF with explicit sample groups
-- multiple multi-sample VCFs with explicit file/sample sets
-
-Proposed examples:
+Shared variants emit records from the left VCF:
 
 ```bash
 varlock intersect \
@@ -488,6 +485,39 @@ varlock intersect \
   --mode shared \
   --output shared.vcf.gz
 ```
+
+Difference modes emit records unique to one side:
+
+```bash
+varlock intersect \
+  --left tumor.vcf.gz \
+  --right normal.vcf.gz \
+  --mode left-only \
+  --output tumor_only.vcf.gz
+```
+
+```bash
+varlock intersect \
+  --left tumor.vcf.gz \
+  --right normal.vcf.gz \
+  --mode right-only \
+  --output normal_only.vcf.gz
+```
+
+Output records include `INFO/VARLOCK_SET=both`, `left`, or `right` and are
+written as bgzipped VCF with a CSI index by default.
+
+## Roadmap
+
+Planned features are tracked with `bd` issues.
+
+### Variant Intersection And Difference
+
+Implemented:
+
+- two-file exact-key `shared`, `left-only`, and `right-only`
+
+Planned examples:
 
 ```bash
 varlock intersect \
@@ -516,21 +546,13 @@ Design decisions to settle before implementation:
 
 Planned implementation phases:
 
-1. Factor shared VCF text utilities from `annotate` and `filter`: text/gzip
-   readers, bgzip/indexed VCF writers, `VariantKey`, multi-ALT key expansion,
-   INFO parsing, header sample parsing, and FORMAT/sample lookup.
-2. Add exact-key two-file operations:
-   `varlock intersect --left LEFT --right RIGHT --mode shared|left-only|right-only`.
-   Default identity is `(CHROM, POS, REF, ALT)`, output preserves records from
-   the emitted side, and membership is record presence rather than genotype
-   support.
-3. Add one-file multi-sample operations:
+1. Add one-file multi-sample operations:
    `--input cohort.vcf.gz --left-samples a,b --right-samples c,d`. In this mode,
    sample support is genotype-aware by default: non-reference `FORMAT/GT` means
    present; missing genotypes count as absent.
-4. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
+2. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
    manifest form for `all-shared`, `any-shared`, and `set-diff A-B`.
-5. Add matching-mode flags: `--reference` for normalized allele keys,
+3. Add matching-mode flags: `--reference` for normalized allele keys,
    `--site-only`, and explicit `--genotype-aware`.
 
 ### Annotation Follow-Ups

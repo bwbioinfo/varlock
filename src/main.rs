@@ -10,6 +10,7 @@ mod annotate;
 mod call_targets;
 mod fasta_prep;
 mod filter;
+mod intersect;
 mod vcf;
 
 use anyhow::{Context, Result};
@@ -76,6 +77,9 @@ enum Command {
 
     /// Filter VCF records using INFO predicates
     Filter(FilterArgs),
+
+    /// Intersect or subtract variants across two VCFs
+    Intersect(IntersectArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -166,6 +170,36 @@ pub struct FilterArgs {
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
     pub index_type: IndexType,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct IntersectArgs {
+    /// Left VCF path (plain or .gz)
+    #[arg(long = "left", value_name = "VCF")]
+    pub left: PathBuf,
+
+    /// Right VCF path (plain or .gz)
+    #[arg(long = "right", value_name = "VCF")]
+    pub right: PathBuf,
+
+    /// Set operation mode
+    #[arg(long = "mode", value_name = "MODE", value_enum)]
+    pub mode: IntersectMode,
+
+    /// Output VCF.gz path
+    #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
+    pub output: PathBuf,
+
+    /// Index type for VCF.gz output
+    #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
+    pub index_type: IndexType,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum IntersectMode {
+    Shared,
+    LeftOnly,
+    RightOnly,
 }
 
 #[cfg(feature = "wgpu")]
@@ -365,6 +399,7 @@ fn main() -> Result<()> {
         Command::CallTargetsGpu(args) => call_targets::gpu::run(args, &ctx),
         Command::Annotate(args) => annotate::run(args, &ctx),
         Command::Filter(args) => filter::run(args, &ctx),
+        Command::Intersect(args) => intersect::run(args, &ctx),
     }
 }
 
