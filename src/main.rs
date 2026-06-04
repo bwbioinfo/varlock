@@ -130,6 +130,34 @@ pub struct FilterArgs {
     #[arg(long = "max-info", value_name = "FIELD=VALUE")]
     pub max_info: Vec<String>,
 
+    /// Define a sample group as NAME=SAMPLE[,SAMPLE...]; repeat for multiple groups
+    #[arg(long = "sample-group", value_name = "NAME=SAMPLE[,SAMPLE...]")]
+    pub sample_groups: Vec<String>,
+
+    /// Keep records where SAMPLE genotype contains an alternate allele; repeatable
+    #[arg(long = "sample-has-alt", value_name = "SAMPLE")]
+    pub sample_has_alt: Vec<String>,
+
+    /// Keep records where SAMPLE has exact FORMAT/GT value; repeatable
+    #[arg(long = "sample-gt", value_name = "SAMPLE=GT")]
+    pub sample_gt: Vec<String>,
+
+    /// Keep records where SAMPLE has FORMAT/DP >= DP; repeatable
+    #[arg(long = "sample-min-dp", value_name = "SAMPLE=DP")]
+    pub sample_min_dp: Vec<String>,
+
+    /// Keep records where any sample in GROUP has an alternate allele; repeatable
+    #[arg(long = "group-any-has-alt", value_name = "GROUP")]
+    pub group_any_has_alt: Vec<String>,
+
+    /// Keep records where any sample in GROUP has exact FORMAT/GT value; repeatable
+    #[arg(long = "group-any-gt", value_name = "GROUP=GT")]
+    pub group_any_gt: Vec<String>,
+
+    /// Keep records where every sample in GROUP has FORMAT/DP >= DP; repeatable
+    #[arg(long = "group-all-min-dp", value_name = "GROUP=DP")]
+    pub group_all_min_dp: Vec<String>,
+
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
     pub index_type: IndexType,

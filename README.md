@@ -392,8 +392,8 @@ tabix index instead.
 ## VCF Filtering
 
 `filter` streams a VCF and keeps records that pass simple INFO predicates. This
-first filtering mode is intended for post-annotation frequency and marker-field
-filters.
+filtering mode is intended for post-annotation frequency, marker-field, and
+sample-aware FORMAT filters.
 
 ```bash
 varlock filter \
@@ -413,9 +413,43 @@ varlock filter \
 ```
 
 For comma-valued INFO fields, `--max-info FIELD=VALUE` requires every numeric
-non-missing value in the field to be at or below the threshold. Filter output is
-bgzipped VCF with a CSI index by default; use `--index-type tbi` to write a
-tabix index instead.
+non-missing value in the field to be at or below the threshold.
+
+Sample-aware filters inspect `FORMAT` values for named samples:
+
+```bash
+varlock filter \
+  --input paired.calls.vcf.gz \
+  --sample-has-alt Tumor \
+  --sample-min-dp Tumor=10 \
+  --sample-gt Normal=0/0 \
+  --output paired.somatic_like.vcf.gz
+```
+
+Groups can be defined once and reused by group predicates:
+
+```bash
+varlock filter \
+  --input cohort.calls.vcf.gz \
+  --sample-group affected=TumorA,TumorB \
+  --sample-group controls=NormalA,NormalB \
+  --group-any-has-alt affected \
+  --group-all-min-dp controls=20 \
+  --output cohort.group_filtered.vcf.gz
+```
+
+Available first-pass sample predicates are:
+
+- `--sample-has-alt SAMPLE` - `FORMAT/GT` contains any non-reference allele.
+- `--sample-gt SAMPLE=GT` - exact `FORMAT/GT` match.
+- `--sample-min-dp SAMPLE=DP` - `FORMAT/DP` is at least `DP`.
+- `--group-any-has-alt GROUP` - any group member has an alternate allele.
+- `--group-any-gt GROUP=GT` - any group member has exact `FORMAT/GT`.
+- `--group-all-min-dp GROUP=DP` - every group member has `FORMAT/DP` at least
+  `DP`.
+
+Filter output preserves all input samples and is bgzipped VCF with a CSI index
+by default; use `--index-type tbi` to write a tabix index instead.
 
 ## Roadmap
 
