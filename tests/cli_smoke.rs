@@ -100,8 +100,13 @@ fn intersect_help_lists_two_file_modes() -> Result<()> {
     assert!(stdout.contains("--input"));
     assert!(stdout.contains("--left-samples"));
     assert!(stdout.contains("--right-samples"));
+    assert!(stdout.contains("--set"));
+    assert!(stdout.contains("--set-manifest"));
+    assert!(stdout.contains("--emit-set"));
     assert!(stdout.contains("--mode"));
-    assert!(stdout.contains("possible values: shared, left-only, right-only"));
+    assert!(stdout.contains(
+        "possible values: shared, left-only, right-only, all-shared, any-shared, set-diff"
+    ));
     Ok(())
 }
 
@@ -190,5 +195,52 @@ fn filter_smoke_writes_filtered_bgzipped_vcf_and_index() -> Result<()> {
     reader.read_to_string(&mut text)?;
     assert!(text.contains("chr1\t10\t.\tA\tC\t.\tPASS\tAF=0.05"));
     assert!(!text.contains("chr1\t11\t.\tA\tG"));
+    Ok(())
+}
+
+#[test]
+fn intersect_smoke_parses_set_diff_expression() -> Result<()> {
+    let dir = tempdir()?;
+    let a = dir.path().join("a.vcf");
+    let b = dir.path().join("b.vcf");
+    let output = dir.path().join("a_minus_b.vcf.gz");
+
+    std::fs::write(
+        &a,
+        "##fileformat=VCFv4.3\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+         chr1\t10\t.\tA\tC\t.\tPASS\t.\n\
+         chr1\t11\t.\tA\tG\t.\tPASS\t.\n",
+    )?;
+    std::fs::write(
+        &b,
+        "##fileformat=VCFv4.3\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+         chr1\t10\t.\tA\tC\t.\tPASS\t.\n",
+    )?;
+
+    let output_result = run_varlock(&[
+        "intersect",
+        "--set",
+        &format!("A={}", a.display()),
+        "--set",
+        &format!("B={}", b.display()),
+        "--mode",
+        "set-diff",
+        "A-B",
+        "--output",
+        output.to_str().context("invalid output path")?,
+    ])?;
+    assert!(
+        output_result.status.success(),
+        "{}",
+        output_text(&output_result)
+    );
+
+    let mut reader = bgzf::io::Reader::new(File::open(output)?);
+    let mut text = String::new();
+    reader.read_to_string(&mut text)?;
+    assert!(text.contains("chr1\t11\t.\tA\tG"));
+    assert!(!text.contains("chr1\t10\t.\tA\tC"));
     Ok(())
 }

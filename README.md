@@ -523,6 +523,42 @@ varlock intersect \
   --output tumor_group_only.vcf.gz
 ```
 
+Multi-set mode compares named sets from repeated `--set` inputs or a tab-delimited
+manifest. A set can use record presence for all records, or genotype support from
+specific samples with `NAME=VCF:SAMPLE[,SAMPLE...]`.
+
+```bash
+varlock intersect \
+  --set A=cohort1.vcf.gz:tumor_a,tumor_b \
+  --set B=cohort2.vcf.gz:tumor_c \
+  --set C=cohort3.vcf.gz:tumor_d \
+  --mode all-shared \
+  --output all_shared.vcf.gz
+```
+
+```bash
+varlock intersect \
+  --set A=file1.vcf.gz:a,b \
+  --set B=file2.vcf.gz:c,d \
+  --set C=file3.vcf.gz:e \
+  --mode set-diff A-B \
+  --output A_minus_B.vcf.gz
+```
+
+Manifest lines are `NAME<TAB>VCF[<TAB>SAMPLE[,SAMPLE...]]`:
+
+```bash
+varlock intersect \
+  --set-manifest sets.tsv \
+  --mode any-shared \
+  --emit-set A \
+  --output any_shared.vcf.gz
+```
+
+Multi-set output emits records from `--emit-set` or, by default, the first set
+(`set-diff` defaults to the left side of `A-B`). Records include
+`INFO/VARLOCK_SET_COUNT` and `INFO/VARLOCK_SETS`.
+
 ## Roadmap
 
 Planned features are tracked with `bd` issues.
@@ -533,16 +569,7 @@ Implemented:
 
 - two-file exact-key `shared`, `left-only`, and `right-only`
 - one-file multi-sample group `shared`, `left-only`, and `right-only`
-
-Planned examples:
-
-```bash
-varlock intersect \
-  --set A=file1.vcf.gz:a,b \
-  --set B=file2.vcf.gz:c,d \
-  --mode set-diff A-B \
-  --output A_minus_B.vcf.gz
-```
+- multi-file named-set `all-shared`, `any-shared`, and `set-diff A-B`
 
 Design decisions to settle before implementation:
 
@@ -554,10 +581,9 @@ Design decisions to settle before implementation:
 
 Planned implementation phases:
 
-1. Add named multi-file sets with repeated `--set NAME=vcf.gz:s1,s2` and a
-   manifest form for `all-shared`, `any-shared`, and `set-diff A-B`.
-2. Add matching-mode flags: `--reference` for normalized allele keys,
+1. Add matching-mode flags: `--reference` for normalized allele keys,
    `--site-only`, and explicit `--genotype-aware`.
+2. Add indexed/streamed multi-set evaluation for large cohorts.
 
 ### Annotation Follow-Ups
 

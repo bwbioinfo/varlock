@@ -194,6 +194,18 @@ pub struct IntersectArgs {
     #[arg(long = "right-samples", value_name = "SAMPLES")]
     pub right_samples: Option<String>,
 
+    /// Named input set as NAME=VCF[:SAMPLE[,SAMPLE...]]; repeat for multi-set mode
+    #[arg(long = "set", value_name = "NAME=VCF[:SAMPLES]")]
+    pub sets: Vec<String>,
+
+    /// Manifest with one set per line: NAME<TAB>VCF[<TAB>SAMPLE[,SAMPLE...]]
+    #[arg(long = "set-manifest", value_name = "TSV")]
+    pub set_manifest: Option<PathBuf>,
+
+    /// Source set to emit records from in multi-set mode (default: first set)
+    #[arg(long = "emit-set", value_name = "NAME")]
+    pub emit_set: Option<String>,
+
     /// Set operation mode
     #[arg(long = "mode", value_name = "MODE", value_enum)]
     pub mode: IntersectMode,
@@ -205,6 +217,10 @@ pub struct IntersectArgs {
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
     pub index_type: IndexType,
+
+    /// Set expression for multi-set modes, e.g. A-B with --mode set-diff
+    #[arg(value_name = "SET_EXPR")]
+    pub set_expr: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -212,6 +228,9 @@ pub enum IntersectMode {
     Shared,
     LeftOnly,
     RightOnly,
+    AllShared,
+    AnyShared,
+    SetDiff,
 }
 
 #[cfg(feature = "wgpu")]
