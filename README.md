@@ -508,6 +508,39 @@ varlock intersect \
 Output records include `INFO/VARLOCK_SET=both`, `left`, or `right` and are
 written as bgzipped VCF with a CSI index by default.
 
+Matching mode flags can be used with two-file and multi-set operations:
+
+- default matching uses exact allele keys: `(CHROM, POS, REF, ALT)`
+- `--site-only` matches by `CHROM/POS` and ignores alleles
+- `--reference FASTA` left-normalizes non-symbolic allele keys before matching
+- `--genotype-aware` keeps only ALT alleles supported by called non-reference
+  `FORMAT/GT` values when samples are present
+
+`--site-only` and `--reference` are mutually exclusive. Multi-ALT records are
+split internally for matching; in genotype-aware mode, only GT-supported ALT
+alleles contribute keys. Symbolic alleles, breakends, and spanning deletions are
+not normalized by `--reference`. Filtered records are not treated specially; they
+participate if their keys match. Missing genotypes such as `./.` or `.|.`,
+missing alleles, and records without `FORMAT/GT` count as absence.
+
+```bash
+varlock intersect \
+  --left caller_a.vcf.gz \
+  --right caller_b.vcf.gz \
+  --reference hg38.fa \
+  --mode shared \
+  --output normalized_shared.vcf.gz
+```
+
+```bash
+varlock intersect \
+  --left tumor.vcf.gz \
+  --right panel.vcf.gz \
+  --site-only \
+  --mode left-only \
+  --output novel_sites.vcf.gz
+```
+
 One-file sample-group mode compares genotype support between explicit sample
 groups. A sample supports a variant when `FORMAT/GT` contains any non-reference
 allele. Missing genotypes such as `./.` or `.|.`, missing alleles, and records
@@ -570,20 +603,15 @@ Implemented:
 - two-file exact-key `shared`, `left-only`, and `right-only`
 - one-file multi-sample group `shared`, `left-only`, and `right-only`
 - multi-file named-set `all-shared`, `any-shared`, and `set-diff A-B`
+- matching modes: `--reference`, `--site-only`, and `--genotype-aware`
 
 Design decisions to settle before implementation:
 
-- variant identity: exact allele key `(CHROM, POS, REF, ALT)` vs site-only
-- optional left-normalization against a reference
-- genotype-aware matching vs presence/absence matching
-- whether missing genotypes count as absence
 - projected VCF output vs tabular summaries
 
 Planned implementation phases:
 
-1. Add matching-mode flags: `--reference` for normalized allele keys,
-   `--site-only`, and explicit `--genotype-aware`.
-2. Add indexed/streamed multi-set evaluation for large cohorts.
+1. Add indexed/streamed multi-set evaluation for large cohorts.
 
 ### Annotation Follow-Ups
 

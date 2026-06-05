@@ -103,6 +103,9 @@ fn intersect_help_lists_two_file_modes() -> Result<()> {
     assert!(stdout.contains("--set"));
     assert!(stdout.contains("--set-manifest"));
     assert!(stdout.contains("--emit-set"));
+    assert!(stdout.contains("--reference"));
+    assert!(stdout.contains("--site-only"));
+    assert!(stdout.contains("--genotype-aware"));
     assert!(stdout.contains("--mode"));
     assert!(stdout.contains(
         "possible values: shared, left-only, right-only, all-shared, any-shared, set-diff"

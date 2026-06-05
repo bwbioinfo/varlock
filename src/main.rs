@@ -206,6 +206,18 @@ pub struct IntersectArgs {
     #[arg(long = "emit-set", value_name = "NAME")]
     pub emit_set: Option<String>,
 
+    /// Reference FASTA for reference-normalized allele-key matching
+    #[arg(short = 'r', long = "reference", value_name = "FASTA")]
+    pub reference: Option<PathBuf>,
+
+    /// Match variants by CHROM/POS only
+    #[arg(long = "site-only")]
+    pub site_only: bool,
+
+    /// Require alternate genotype support when sample genotypes are available
+    #[arg(long = "genotype-aware")]
+    pub genotype_aware: bool,
+
     /// Set operation mode
     #[arg(long = "mode", value_name = "MODE", value_enum)]
     pub mode: IntersectMode,

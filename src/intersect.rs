@@ -13,8 +13,8 @@ use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use crate::{
     ExecutionContext, IntersectArgs, IntersectMode, log_verbose,
     vcf::{
-        IndexRecord, OutputIndex, VariantKey, VcfRecord, open_text_reader, parse_header_samples,
-        variant_keys_from_fields,
+        IndexRecord, OutputIndex, VariantKey, VariantNormalizer, VcfRecord, open_text_reader,
+        parse_header_samples, variant_keys_from_fields,
     },
 };
 
@@ -27,13 +27,14 @@ struct IntersectMetrics {
 
 pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
     let started = Instant::now();
+    let mut match_options = MatchKeyOptions::open(&args)?;
     match resolve_intersect_input(&args)? {
         IntersectInput::TwoFile { left, right } => {
             let left_record_count = count_records(&left)?;
             let right_record_count = count_records(&right)?;
-            let right_keys = load_variant_keys(&right)?;
+            let right_keys = load_variant_keys(&right, &mut match_options)?;
             let left_keys = if matches!(args.mode, IntersectMode::RightOnly) {
-                load_variant_keys(&left)?
+                load_variant_keys(&left, &mut match_options)?
             } else {
                 HashSet::new()
             };
@@ -45,6 +46,7 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
                     &right_keys,
                     MatchSense::Present,
                     "both",
+                    &mut match_options,
                 )?,
                 IntersectMode::LeftOnly => write_selected_records(
                     &left,
@@ -53,6 +55,7 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
                     &right_keys,
                     MatchSense::Absent,
                     "left",
+                    &mut match_options,
                 )?,
                 IntersectMode::RightOnly => write_selected_records(
                     &right,
@@ -61,6 +64,7 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
                     &left_keys,
                     MatchSense::Absent,
                     "right",
+                    &mut match_options,
                 )?,
                 IntersectMode::AllShared | IntersectMode::AnyShared | IntersectMode::SetDiff => {
                     unreachable!("multi-set modes are rejected before two-file execution")
@@ -94,6 +98,7 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
                 args.mode,
                 &left_samples,
                 &right_samples,
+                &mut match_options,
             )?;
             log_verbose(
                 ctx,
@@ -119,6 +124,7 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
                 args.index_type,
                 args.mode,
                 set_diff.as_ref(),
+                &mut match_options,
             )?;
             log_verbose(
                 ctx,
@@ -135,6 +141,30 @@ pub(crate) fn run(args: IntersectArgs, ctx: &ExecutionContext) -> Result<()> {
         }
     }
     Ok(())
+}
+
+struct MatchKeyOptions {
+    site_only: bool,
+    genotype_aware: bool,
+    normalizer: Option<VariantNormalizer>,
+}
+
+impl MatchKeyOptions {
+    fn open(args: &IntersectArgs) -> Result<Self> {
+        if args.site_only && args.reference.is_some() {
+            bail!("--site-only cannot be combined with --reference");
+        }
+        let normalizer = args
+            .reference
+            .as_deref()
+            .map(VariantNormalizer::open)
+            .transpose()?;
+        Ok(Self {
+            site_only: args.site_only,
+            genotype_aware: args.genotype_aware,
+            normalizer,
+        })
+    }
 }
 
 enum IntersectInput {
@@ -410,19 +440,28 @@ enum MatchSense {
     Absent,
 }
 
-fn load_variant_keys(path: &Path) -> Result<HashSet<VariantKey>> {
+fn load_variant_keys(path: &Path, options: &mut MatchKeyOptions) -> Result<HashSet<VariantKey>> {
     let mut reader =
         open_text_reader(path).with_context(|| format!("failed to open VCF {}", path.display()))?;
     let mut keys = HashSet::new();
+    let mut sample_index = HashMap::new();
     let mut line = String::new();
     while reader.read_line(&mut line)? != 0 {
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+        if trimmed.starts_with("#CHROM") {
+            let (_, parsed_sample_index) = parse_header_samples(trimmed);
+            sample_index = parsed_sample_index;
+        } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
             let fields = trimmed.split('\t').collect::<Vec<_>>();
             if fields.len() < 8 {
                 bail!("invalid VCF record with fewer than 8 fields: {trimmed}");
             }
-            keys.extend(variant_keys_from_fields(&fields));
+            keys.extend(record_keys_for_matching_fields(
+                &fields,
+                &sample_index,
+                None,
+                options,
+            )?);
         }
         line.clear();
     }
@@ -451,6 +490,7 @@ fn write_selected_records(
     comparison_keys: &HashSet<VariantKey>,
     sense: MatchSense,
     membership: &str,
+    options: &mut MatchKeyOptions,
 ) -> Result<IntersectMetrics> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
@@ -468,11 +508,14 @@ fn write_selected_records(
     let mut metrics = IntersectMetrics::default();
     let mut wrote_header = false;
     let mut wrote_varlock_header = false;
+    let mut sample_index = HashMap::new();
 
     let mut line = String::new();
     while reader.read_line(&mut line)? != 0 {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.starts_with("#CHROM") {
+            let (_, parsed_sample_index) = parse_header_samples(trimmed);
+            sample_index = parsed_sample_index;
             if !wrote_varlock_header {
                 write_varlock_intersect_headers(&mut writer)?;
                 wrote_varlock_header = true;
@@ -487,7 +530,7 @@ fn write_selected_records(
             if fields.len() < 8 {
                 bail!("invalid VCF record with fewer than 8 fields: {trimmed}");
             }
-            let keys = variant_keys_from_fields(&fields);
+            let keys = record_keys_for_matching_fields(&fields, &sample_index, None, options)?;
             let is_match = keys.iter().any(|key| comparison_keys.contains(key));
             let keep = match sense {
                 MatchSense::Present => is_match,
@@ -523,6 +566,7 @@ fn write_sample_group_records(
     mode: IntersectMode,
     left_samples: &[String],
     right_samples: &[String],
+    _options: &mut MatchKeyOptions,
 ) -> Result<IntersectMetrics> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
@@ -613,6 +657,7 @@ fn write_multi_set_records(
     index_type: crate::IndexType,
     mode: IntersectMode,
     set_diff: Option<&SetDiffExpr>,
+    options: &mut MatchKeyOptions,
 ) -> Result<IntersectMetrics> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
@@ -624,7 +669,7 @@ fn write_multi_set_records(
     let set_data = sets
         .iter()
         .map(|set| {
-            load_named_set_keys(set).map(|keys| NamedSetData {
+            load_named_set_keys(set, options).map(|keys| NamedSetData {
                 spec: set.clone(),
                 keys,
             })
@@ -669,7 +714,8 @@ fn write_multi_set_records(
             if fields.len() < 8 {
                 bail!("invalid VCF record with fewer than 8 fields: {trimmed}");
             }
-            let record_keys = record_keys_for_set_fields(&fields, &sample_index, &emit.spec)?;
+            let record_keys =
+                record_keys_for_set_fields(&fields, &sample_index, &emit.spec, options)?;
             let matched_key = record_keys
                 .iter()
                 .find(|key| multi_set_key_selected(key, &set_data, mode, set_diff))
@@ -702,7 +748,10 @@ fn write_multi_set_records(
     Ok(metrics)
 }
 
-fn load_named_set_keys(set: &NamedSetSpec) -> Result<HashSet<VariantKey>> {
+fn load_named_set_keys(
+    set: &NamedSetSpec,
+    options: &mut MatchKeyOptions,
+) -> Result<HashSet<VariantKey>> {
     let mut reader = open_text_reader(&set.path)
         .with_context(|| format!("failed to open set VCF {}", set.path.display()))?;
     let mut keys = HashSet::new();
@@ -723,7 +772,12 @@ fn load_named_set_keys(set: &NamedSetSpec) -> Result<HashSet<VariantKey>> {
             if fields.len() < 8 {
                 bail!("invalid VCF record with fewer than 8 fields: {trimmed}");
             }
-            keys.extend(record_keys_for_set_fields(&fields, &sample_index, set)?);
+            keys.extend(record_keys_for_set_fields(
+                &fields,
+                &sample_index,
+                set,
+                options,
+            )?);
         }
         line.clear();
     }
@@ -740,17 +794,64 @@ fn record_keys_for_set_fields(
     fields: &[&str],
     sample_index: &HashMap<String, usize>,
     set: &NamedSetSpec,
+    options: &mut MatchKeyOptions,
 ) -> Result<Vec<VariantKey>> {
-    if set.samples.is_empty() {
-        return Ok(variant_keys_from_fields(fields));
-    }
+    let samples = if set.samples.is_empty() {
+        None
+    } else {
+        Some(set.samples.as_slice())
+    };
+    record_keys_for_matching_fields(fields, sample_index, samples, options)
+}
 
-    let record = VcfRecord::new(fields, sample_index);
-    let mut alt_indices = HashSet::new();
-    for sample in &set.samples {
-        alt_indices.extend(sample_alt_allele_indices(&record, sample)?);
+fn record_keys_for_matching_fields(
+    fields: &[&str],
+    sample_index: &HashMap<String, usize>,
+    samples: Option<&[String]>,
+    options: &mut MatchKeyOptions,
+) -> Result<Vec<VariantKey>> {
+    let sample_filter = if let Some(samples) = samples {
+        Some(samples.to_vec())
+    } else if options.genotype_aware && !sample_index.is_empty() {
+        Some(sample_index.keys().cloned().collect::<Vec<_>>())
+    } else {
+        None
+    };
+
+    let raw_keys = if let Some(samples) = sample_filter {
+        let record = VcfRecord::new(fields, sample_index);
+        let mut alt_indices = HashSet::new();
+        for sample in &samples {
+            alt_indices.extend(sample_alt_allele_indices(&record, sample)?);
+        }
+        variant_keys_for_alt_indices(fields, &alt_indices)
+    } else {
+        variant_keys_from_fields(fields)
+    };
+
+    let mut keys = Vec::with_capacity(raw_keys.len());
+    for key in raw_keys {
+        let key = if let Some(normalizer) = options.normalizer.as_mut() {
+            normalizer.normalize_key(key)?
+        } else {
+            key
+        };
+        keys.push(if options.site_only {
+            site_key_from_variant_key(key)
+        } else {
+            key
+        });
     }
-    Ok(variant_keys_for_alt_indices(fields, &alt_indices))
+    Ok(keys)
+}
+
+fn site_key_from_variant_key(key: VariantKey) -> VariantKey {
+    VariantKey {
+        chrom: key.chrom,
+        pos: key.pos,
+        ref_allele: String::new(),
+        alt_allele: String::new(),
+    }
 }
 
 fn sample_alt_allele_indices(record: &VcfRecord<'_>, sample: &str) -> Result<HashSet<usize>> {
@@ -976,6 +1077,9 @@ mod tests {
             sets: Vec::new(),
             set_manifest: None,
             emit_set: None,
+            reference: None,
+            site_only: false,
+            genotype_aware: false,
             mode: IntersectMode::Shared,
             output: output.clone(),
             index_type: crate::IndexType::Csi,
@@ -1023,6 +1127,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::LeftOnly,
                 output: left_only.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1043,6 +1150,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::RightOnly,
                 output: right_only.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1083,6 +1193,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::Shared,
                 output: output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1121,6 +1234,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::Shared,
                 output: output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1164,6 +1280,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::LeftOnly,
                 output: output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1223,6 +1342,9 @@ mod tests {
                 ],
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::AllShared,
                 output: all_output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1247,6 +1369,9 @@ mod tests {
                 ],
                 set_manifest: None,
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::AnyShared,
                 output: any_output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1316,6 +1441,9 @@ mod tests {
                 sets: Vec::new(),
                 set_manifest: Some(manifest),
                 emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: false,
                 mode: IntersectMode::SetDiff,
                 output: output.clone(),
                 index_type: crate::IndexType::Csi,
@@ -1332,6 +1460,215 @@ mod tests {
             "chr1\t11\t.\tA\tG\t.\tPASS\tVARLOCK_SET=multi;VARLOCK_SET_COUNT=2;VARLOCK_SETS=A,C\tGT\t0/1\t0/0\t0/0\t0/0"
         ));
         assert!(!text.contains("chr1\t10\t.\tA\tC"));
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_site_only_matches_same_position_different_alleles() -> Result<()> {
+        let dir = tempdir()?;
+        let left = dir.path().join("left.vcf");
+        let right = dir.path().join("right.vcf");
+        let output = dir.path().join("site_shared.vcf.gz");
+        write_vcf(&left, "chr1\t10\t.\tA\tC\t.\tPASS\t.\n")?;
+        write_vcf(&right, "chr1\t10\t.\tA\tG\t.\tPASS\t.\n")?;
+
+        run(
+            IntersectArgs {
+                left: Some(left),
+                right: Some(right),
+                input: None,
+                left_samples: None,
+                right_samples: None,
+                sets: Vec::new(),
+                set_manifest: None,
+                emit_set: None,
+                reference: None,
+                site_only: true,
+                genotype_aware: false,
+                mode: IntersectMode::Shared,
+                output: output.clone(),
+                index_type: crate::IndexType::Csi,
+                set_expr: None,
+            },
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+
+        let text = read_bgzip(&output)?;
+        assert!(text.contains("chr1\t10\t.\tA\tC\t.\tPASS\tVARLOCK_SET=both"));
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_reference_normalizes_left_shiftable_indels() -> Result<()> {
+        let dir = tempdir()?;
+        let left = dir.path().join("left.vcf");
+        let right = dir.path().join("right.vcf");
+        let reference = dir.path().join("ref.fa");
+        let output = dir.path().join("normalized_shared.vcf.gz");
+        write_reference_with_fai(&reference, "chr1", "AAAAAA")?;
+        write_vcf(&left, "chr1\t3\t.\tAA\tA\t.\tPASS\t.\n")?;
+        write_vcf(&right, "chr1\t1\t.\tAA\tA\t.\tPASS\t.\n")?;
+
+        run(
+            IntersectArgs {
+                left: Some(left),
+                right: Some(right),
+                input: None,
+                left_samples: None,
+                right_samples: None,
+                sets: Vec::new(),
+                set_manifest: None,
+                emit_set: None,
+                reference: Some(reference),
+                site_only: false,
+                genotype_aware: false,
+                mode: IntersectMode::Shared,
+                output: output.clone(),
+                index_type: crate::IndexType::Csi,
+                set_expr: None,
+            },
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+
+        let text = read_bgzip(&output)?;
+        assert!(text.contains("chr1\t3\t.\tAA\tA\t.\tPASS\tVARLOCK_SET=both"));
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_reference_leaves_symbolic_alleles_unchanged() -> Result<()> {
+        let dir = tempdir()?;
+        let left = dir.path().join("left.vcf");
+        let right = dir.path().join("right.vcf");
+        let reference = dir.path().join("ref.fa");
+        let output = dir.path().join("symbolic_shared.vcf.gz");
+        write_reference_with_fai(&reference, "chr1", "AAAAAA")?;
+        write_vcf(&left, "chr1\t3\t.\tA\t<DEL>\t.\tPASS\t.\n")?;
+        write_vcf(&right, "chr1\t3\t.\tA\t<DEL>\t.\tPASS\t.\n")?;
+
+        run(
+            IntersectArgs {
+                left: Some(left),
+                right: Some(right),
+                input: None,
+                left_samples: None,
+                right_samples: None,
+                sets: Vec::new(),
+                set_manifest: None,
+                emit_set: None,
+                reference: Some(reference),
+                site_only: false,
+                genotype_aware: false,
+                mode: IntersectMode::Shared,
+                output: output.clone(),
+                index_type: crate::IndexType::Csi,
+                set_expr: None,
+            },
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+
+        let text = read_bgzip(&output)?;
+        assert!(text.contains("chr1\t3\t.\tA\t<DEL>\t.\tPASS\tVARLOCK_SET=both"));
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_genotype_aware_treats_missing_genotypes_as_absence() -> Result<()> {
+        let dir = tempdir()?;
+        let left = dir.path().join("left.vcf");
+        let right = dir.path().join("right.vcf");
+        let output = dir.path().join("gt_shared.vcf.gz");
+        write_multi_sample_vcf(
+            &left,
+            "chr1\t10\t.\tA\tC\t.\tPASS\t.\tGT\t0/1\t0/0\t./.\t.|.\n\
+             chr1\t11\t.\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/0\t./.\t.|.\n",
+        )?;
+        write_multi_sample_vcf(
+            &right,
+            "chr1\t10\t.\tA\tC\t.\tPASS\t.\tGT\t0/0\t0/1\t./.\t.|.\n\
+             chr1\t11\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\t0/0\t./.\t.|.\n",
+        )?;
+
+        run(
+            IntersectArgs {
+                left: Some(left),
+                right: Some(right),
+                input: None,
+                left_samples: None,
+                right_samples: None,
+                sets: Vec::new(),
+                set_manifest: None,
+                emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: true,
+                mode: IntersectMode::Shared,
+                output: output.clone(),
+                index_type: crate::IndexType::Csi,
+                set_expr: None,
+            },
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+
+        let text = read_bgzip(&output)?;
+        assert!(text.contains("chr1\t10\t.\tA\tC\t.\tPASS\tVARLOCK_SET=both"));
+        assert!(!text.contains("chr1\t11\t.\tA\tG"));
+        Ok(())
+    }
+
+    #[test]
+    fn intersect_genotype_aware_limits_multialt_to_supported_alt() -> Result<()> {
+        let dir = tempdir()?;
+        let left = dir.path().join("left.vcf");
+        let right = dir.path().join("right.vcf");
+        let output = dir.path().join("gt_multialt_shared.vcf.gz");
+        write_multi_sample_vcf(
+            &left,
+            "chr1\t10\t.\tA\tC,G\t.\tPASS\t.\tGT\t0/1\t0/0\t0/0\t0/0\n",
+        )?;
+        write_multi_sample_vcf(
+            &right,
+            "chr1\t10\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\t0/0\t0/0\t0/0\n",
+        )?;
+
+        run(
+            IntersectArgs {
+                left: Some(left),
+                right: Some(right),
+                input: None,
+                left_samples: None,
+                right_samples: None,
+                sets: Vec::new(),
+                set_manifest: None,
+                emit_set: None,
+                reference: None,
+                site_only: false,
+                genotype_aware: true,
+                mode: IntersectMode::Shared,
+                output: output.clone(),
+                index_type: crate::IndexType::Csi,
+                set_expr: None,
+            },
+            &ExecutionContext {
+                verbose: 0,
+                threads: 1,
+            },
+        )?;
+
+        let text = read_bgzip(&output)?;
+        assert!(!text.contains("chr1\t10\t.\tA\tC,G"));
         Ok(())
     }
 
@@ -1352,6 +1689,26 @@ mod tests {
                 "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ta\tb\tc\td\n{records}"
             ),
         )?;
+        Ok(())
+    }
+
+    fn write_reference_with_fai(path: &Path, name: &str, sequence: &str) -> Result<()> {
+        let fasta = format!(">{name}\n{sequence}\n");
+        std::fs::write(path, fasta)?;
+        let offset = name.len() + 2;
+        let fai = format!(
+            "{name}\t{}\t{offset}\t{}\t{}\n",
+            sequence.len(),
+            sequence.len(),
+            sequence.len() + 1
+        );
+        let mut fai_path = path.to_path_buf();
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            fai_path.set_extension(format!("{ext}.fai"));
+        } else {
+            fai_path.set_extension("fai");
+        }
+        std::fs::write(fai_path, fai)?;
         Ok(())
     }
 

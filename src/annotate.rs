@@ -12,12 +12,11 @@ use noodles_core::Region;
 use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Chunk};
 use noodles_tabix as tabix;
 
-use crate::call_targets::reference::{FastaIndex, open_fasta_index};
 use crate::{
     AnnotateArgs, ExecutionContext, IndexType, log_verbose,
     vcf::{
-        IndexRecord, OutputIndex, VariantKey, csi_index_path, open_text_reader, parse_info_string,
-        tabix_index_path, variant_keys_from_fields as raw_variant_keys_from_fields,
+        IndexRecord, OutputIndex, VariantKey, VariantNormalizer, csi_index_path,
+        normalized_variant_keys_from_fields, open_text_reader, parse_info_string, tabix_index_path,
     },
 };
 
@@ -35,107 +34,6 @@ struct FieldMapping {
 
 type AnnotationValues = BTreeMap<String, String>;
 type AnnotationMap = HashMap<VariantKey, AnnotationValues>;
-
-struct VariantNormalizer {
-    fasta: FastaIndex,
-}
-
-impl VariantNormalizer {
-    fn open(reference: &Path) -> Result<Self> {
-        Ok(Self {
-            fasta: open_fasta_index(reference)?,
-        })
-    }
-
-    fn normalize_key(&mut self, key: VariantKey) -> Result<VariantKey> {
-        if is_symbolic_or_special_allele(&key.ref_allele)
-            || is_symbolic_or_special_allele(&key.alt_allele)
-        {
-            return Ok(key);
-        }
-
-        let mut pos = key
-            .pos
-            .parse::<u32>()
-            .with_context(|| format!("invalid VCF position {:?}", key.pos))?;
-        let mut ref_allele = key.ref_allele.to_ascii_uppercase();
-        let mut alt_allele = key.alt_allele.to_ascii_uppercase();
-
-        trim_common_suffix(&mut ref_allele, &mut alt_allele);
-        trim_common_prefix(&mut pos, &mut ref_allele, &mut alt_allele);
-
-        if ref_allele.len() != alt_allele.len() {
-            while pos > 1 {
-                let prev_base = self.fasta.fetch_base(&key.chrom, pos - 1)? as char;
-                let Some(ref_last) = ref_allele.chars().last() else {
-                    break;
-                };
-                let Some(alt_last) = alt_allele.chars().last() else {
-                    break;
-                };
-                if ref_last != prev_base || alt_last != prev_base {
-                    break;
-                }
-                ref_allele.pop();
-                alt_allele.pop();
-                ref_allele.insert(0, prev_base);
-                alt_allele.insert(0, prev_base);
-                pos -= 1;
-            }
-        }
-
-        trim_common_suffix(&mut ref_allele, &mut alt_allele);
-        trim_common_prefix(&mut pos, &mut ref_allele, &mut alt_allele);
-
-        Ok(VariantKey {
-            chrom: key.chrom,
-            pos: pos.to_string(),
-            ref_allele,
-            alt_allele,
-        })
-    }
-}
-
-fn is_symbolic_or_special_allele(allele: &str) -> bool {
-    allele == "*"
-        || allele.starts_with('<')
-        || allele.contains('>')
-        || allele.contains('[')
-        || allele.contains(']')
-}
-
-fn trim_common_suffix(ref_allele: &mut String, alt_allele: &mut String) {
-    while ref_allele.len() > 1 && alt_allele.len() > 1 {
-        let Some(ref_last) = ref_allele.chars().last() else {
-            break;
-        };
-        let Some(alt_last) = alt_allele.chars().last() else {
-            break;
-        };
-        if ref_last != alt_last {
-            break;
-        }
-        ref_allele.pop();
-        alt_allele.pop();
-    }
-}
-
-fn trim_common_prefix(pos: &mut u32, ref_allele: &mut String, alt_allele: &mut String) {
-    while ref_allele.len() > 1 && alt_allele.len() > 1 {
-        let Some(ref_first) = ref_allele.chars().next() else {
-            break;
-        };
-        let Some(alt_first) = alt_allele.chars().next() else {
-            break;
-        };
-        if ref_first != alt_first {
-            break;
-        }
-        ref_allele.remove(0);
-        alt_allele.remove(0);
-        *pos = pos.saturating_add(1);
-    }
-}
 
 pub(crate) fn run(args: AnnotateArgs, ctx: &ExecutionContext) -> Result<()> {
     let started = Instant::now();
@@ -606,18 +504,9 @@ fn parse_database_records(
 
 fn variant_keys_from_fields(
     fields: &[&str],
-    mut normalizer: Option<&mut VariantNormalizer>,
+    normalizer: Option<&mut VariantNormalizer>,
 ) -> Result<Vec<VariantKey>> {
-    let mut keys = Vec::new();
-    for key in raw_variant_keys_from_fields(fields) {
-        let key = if let Some(normalizer) = normalizer.as_deref_mut() {
-            normalizer.normalize_key(key)?
-        } else {
-            key
-        };
-        keys.push(key);
-    }
-    Ok(keys)
+    normalized_variant_keys_from_fields(fields, normalizer)
 }
 
 fn annotation_value_for_alt(value: &str, alt_count: usize, alt_index: usize) -> String {
