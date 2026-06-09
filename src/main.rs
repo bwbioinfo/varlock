@@ -324,7 +324,7 @@ pub struct CallTargetsArgs {
     #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
     pub output: Option<PathBuf>,
 
-    /// Read-group to sample mapping file (RG<tab>SM)
+    /// Read-group to sample mapping TSV with RG and SM headers
     #[arg(long = "rg-map", value_name = "FILE")]
     pub rg_map: Option<PathBuf>,
 

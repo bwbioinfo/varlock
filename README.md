@@ -132,6 +132,7 @@ varlock call-targets \
 `rg_to_sample.tsv` format:
 
 ```text
+RG       SM
 RG001    Tumor
 RG002    Normal
 ```

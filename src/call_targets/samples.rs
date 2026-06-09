@@ -53,6 +53,7 @@ pub(crate) fn read_rg_map(path: &Path) -> Result<Vec<(String, String)>> {
         File::open(path).with_context(|| format!("failed to open rg_map {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
+    let mut saw_header = false;
     for line in reader.lines() {
         let line = line.context("failed to read rg_map line")?;
         let line = line.trim();
@@ -60,10 +61,20 @@ pub(crate) fn read_rg_map(path: &Path) -> Result<Vec<(String, String)>> {
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
+        if !saw_header {
+            if parts.len() < 2 || parts[0] != "RG" || parts[1] != "SM" {
+                bail!("rg-map header must start with RG and SM columns");
+            }
+            saw_header = true;
+            continue;
+        }
         if parts.len() < 2 {
             continue;
         }
         rows.push((parts[0].to_string(), parts[1].to_string()));
+    }
+    if !saw_header {
+        bail!("rg-map header must start with RG and SM columns");
     }
     Ok(rows)
 }
@@ -136,6 +147,7 @@ mod tests {
     #[test]
     fn read_rg_map_parses_tab_separated_lines() -> Result<()> {
         let mut f = NamedTempFile::new()?;
+        writeln!(f, "RG\tSM")?;
         writeln!(f, "rg1\tsample_a")?;
         writeln!(f, "rg2\tsample_b")?;
 
@@ -151,6 +163,7 @@ mod tests {
         let mut f = NamedTempFile::new()?;
         writeln!(f, "# header comment")?;
         writeln!(f)?;
+        writeln!(f, "RG\tSM")?;
         writeln!(f, "rg1\tsample_a")?;
         writeln!(f, "rg2\tsample_b")?;
 
@@ -162,6 +175,7 @@ mod tests {
     #[test]
     fn read_rg_map_skips_lines_with_fewer_than_two_fields() -> Result<()> {
         let mut f = NamedTempFile::new()?;
+        writeln!(f, "RG\tSM")?;
         writeln!(f, "rg1\tsample_a")?;
         writeln!(f, "orphan_rg")?; // only one field — skip
         writeln!(f, "rg2\tsample_b")?;
@@ -169,6 +183,24 @@ mod tests {
         let rows = read_rg_map(f.path())?;
         assert_eq!(rows.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn read_rg_map_errors_without_rg_sm_header() -> Result<()> {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "rg1\tsample_a")?;
+
+        let err = read_rg_map(f.path()).unwrap_err();
+        assert!(err.to_string().contains("header must start with RG and SM"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_rg_map_errors_on_empty_file() {
+        let f = NamedTempFile::new().unwrap();
+
+        let err = read_rg_map(f.path()).unwrap_err();
+        assert!(err.to_string().contains("header must start with RG and SM"));
     }
 
     #[test]
