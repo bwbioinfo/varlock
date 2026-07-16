@@ -667,6 +667,8 @@ mod tests {
             targets: None,
             output: None,
             rg_map: None,
+            #[cfg(feature = "wgpu")]
+            gpu: crate::GpuArgs::default(),
             index_type: IndexType::Csi,
             min_mapq: 20,
             min_baseq: 20,

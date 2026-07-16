@@ -42,24 +42,28 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     let run_started = Instant::now();
 
     let selector = GpuSelector {
-        list: args.gpu_list,
-        indices: args.gpu_indices.clone(),
-        name: args.gpu_name.clone(),
+        list: args.call.gpu.gpu_list,
+        indices: args.call.gpu.gpu_indices.clone(),
+        name: args.call.gpu.gpu_name.clone(),
     };
 
-    let runtimes = try_initialize_gpus(backend_mask(args.gpu_backend), &selector, ctx.verbose)?;
+    let runtimes = try_initialize_gpus(
+        backend_mask(args.call.gpu.gpu_backend),
+        &selector,
+        ctx.verbose,
+    )?;
     if runtimes.is_empty() {
-        if args.gpu_list {
+        if args.call.gpu.gpu_list {
             return Ok(());
         }
-        if args.require_gpu {
+        if args.call.gpu.require_gpu {
             bail!("no compatible GPU adapter found");
         }
         log_verbose(
             ctx,
             format!("{label} no compatible GPU adapter found; falling back to CPU call-targets"),
         );
-        return call_targets::run(args.call, ctx);
+        return call_targets::run_cpu(args.call, ctx);
     };
 
     let gpu_workers = build_gpu_worker_runtimes(&args, ctx, runtimes)?;
@@ -87,17 +91,17 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     if ctx.verbose > 0 {
         let auto_budget_mib = auto.stream_matrix_budget_bytes / (1024 * 1024);
         let eff_budget_mib = matrix_budget / (1024 * 1024);
-        let budget_note = if args.matrix_budget_mib.is_some() {
+        let budget_note = if args.call.gpu.matrix_budget_mib.is_some() {
             " (override)"
         } else {
             " (auto)"
         };
-        let obs_note = if args.max_obs_upload.is_some() {
+        let obs_note = if args.call.gpu.max_obs_upload.is_some() {
             " (override)"
         } else {
             " (auto)"
         };
-        let flush_note = if args.obs_flush_threshold.is_some() {
+        let flush_note = if args.call.gpu.obs_flush_threshold.is_some() {
             " (override)"
         } else {
             ""
@@ -171,10 +175,12 @@ fn build_gpu_worker_runtimes(
         let tier = classify_adapter(&runtime.adapter_info);
         let auto = auto_tuning_for_tier(tier);
         let requested_budget = args
+            .call
+            .gpu
             .matrix_budget_mib
             .map(|mib| mib.saturating_mul(1024 * 1024))
             .unwrap_or(auto.stream_matrix_budget_bytes);
-        let requested_obs = args.max_obs_upload.unwrap_or(auto.max_obs_upload);
+        let requested_obs = args.call.gpu.max_obs_upload.unwrap_or(auto.max_obs_upload);
 
         let matrix_budget = effective_matrix_budget(&runtime.limits, requested_budget);
         let max_obs_upload = runtime::effective_max_obs_upload(
@@ -183,7 +189,7 @@ fn build_gpu_worker_runtimes(
             size_of::<observation::Observation>(),
             kernel::WORKGROUP_SIZE as usize,
         );
-        let flush_threshold = args.obs_flush_threshold.unwrap_or(max_obs_upload);
+        let flush_threshold = args.call.gpu.obs_flush_threshold.unwrap_or(max_obs_upload);
         let kernel = create_kernel(&runtime, max_obs_upload)?;
 
         if ctx.verbose > 0 {

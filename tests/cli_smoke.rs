@@ -62,7 +62,21 @@ fn call_targets_help_lists_pair_flags() -> Result<()> {
 
 #[cfg(feature = "wgpu")]
 #[test]
-fn call_targets_gpu_help_lists_pair_flags() -> Result<()> {
+fn call_targets_help_lists_gpu_controls() -> Result<()> {
+    let output = run_varlock(&["call-targets", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--cpu"));
+    assert!(stdout.contains("--gpu-list"));
+    assert!(stdout.contains("--gpu-index"));
+    assert!(stdout.contains("--require-gpu"));
+    Ok(())
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn call_targets_gpu_alias_help_lists_pair_flags() -> Result<()> {
     let output = run_varlock(&["call-targets-gpu", "--help"])?;
     assert!(output.status.success(), "{}", output_text(&output));
 

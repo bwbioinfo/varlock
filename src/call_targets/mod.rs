@@ -38,7 +38,21 @@ fn derive_output(resolved_inputs: &[PathBuf], bamlist: Option<&std::path::Path>)
     PathBuf::from(format!("{stem}.vcf.gz"))
 }
 
+#[cfg(feature = "wgpu")]
 pub fn run(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<()> {
+    if args.gpu.cpu {
+        return run_cpu(args, ctx);
+    }
+
+    gpu::run(crate::CallTargetsGpuArgs { call: args }, ctx)
+}
+
+#[cfg(not(feature = "wgpu"))]
+pub fn run(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<()> {
+    run_cpu(args, ctx)
+}
+
+pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<()> {
     let label = "call_targets";
     let prepared = prepare_call_targets(&args, ctx, label)?;
     let sample_count = prepared.sample_names.len();
@@ -394,6 +408,8 @@ mod tests {
             targets: None,
             output: None,
             rg_map: None,
+            #[cfg(feature = "wgpu")]
+            gpu: crate::GpuArgs::default(),
             index_type: IndexType::Csi,
             min_mapq: 20,
             min_baseq: 20,

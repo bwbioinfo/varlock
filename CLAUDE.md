@@ -55,18 +55,18 @@ bd close <id>         # Complete work
 ```bash
 cargo build                        # debug build
 cargo build --release              # release build
-cargo build --features wgpu        # include experimental GPU calling modules
+cargo build --features wgpu        # include GPU calling modules
 cargo check                        # fast type-check without linking
 cargo clippy                       # lint
 cargo test                         # run all tests
 cargo run -- call-targets --help   # run the CLI
 ```
 
-No tests exist yet. The edition is 2024, so `let`-chains (`if let Some(x) = y && cond`) and other edition-2024 features are in active use throughout the codebase.
+The edition is 2024, so `let`-chains (`if let Some(x) = y && cond`) and other edition-2024 features are in active use throughout the codebase.
 
 ## Architecture Overview
 
-`varlock` is a single-binary CLI for pileup-based SNV calling from BAM files. Currently only one subcommand exists: `call-targets`.
+`varlock` is a single-binary CLI for pileup-based SNV calling from BAM files. `call-targets` is the primary caller; when built with the `wgpu` feature it tries GPU acceleration by default and uses `--cpu` to force the CPU path. `call-targets-gpu` is retained as a compatibility alias.
 
 ### Module responsibilities
 
@@ -74,7 +74,7 @@ No tests exist yet. The edition is 2024, so `let`-chains (`if let Some(x) = y &&
 
 **`fasta_prep.rs`** — Self-contained reference preparation. `prepare_reference` is the sole public entry point: if the given FASTA already has a `.fai` (and `.gzi` for bgzipped inputs) it returns immediately; otherwise it sorts sequences by name, re-wraps at 60 bp, and writes a multi-threaded BGZF output alongside `.fai` and `.gzi` indices as `<name>.sorted.fa.gz` next to the original. Intermediate work is spooled to a temp dir that self-cleans on drop.
 
-**`call_targets.rs`** — Currently a monolith that is intended to be split into focused sub-modules. Logical groupings within the file:
+**`call_targets/`** — CPU and GPU call-targets implementation. `mod.rs` owns shared preparation and CPU dispatch; `gpu/` owns adapter selection, scan workers, kernels, and aggregation. Logical groupings:
 
 | Concern | Key items |
 |---|---|

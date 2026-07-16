@@ -8,7 +8,6 @@ include = [
     "Cargo.lock",
     "README*",
     "src/",
-    "tests/",
     "images/",
 ]
 

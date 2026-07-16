@@ -1,9 +1,53 @@
 # varlock
 
-`varlock` is a Rust CLI for simple pileup-based SNV calling from BAM alignments.
-It writes bgzipped VCF output and an index. The current implementation focuses on
-calling A/C/G/T substitutions from one or more BAMs, either across target regions
-or across all covered positions.
+`varlock` is a Rust CLI for pileup-based SNV calling, VCF annotation, filtering,
+and variant set comparison. The calling workflow reads one or more BAM files,
+counts A/C/G/T support at target sites or all covered positions, and writes a
+bgzipped VCF plus an index.
+
+The caller is designed for targeted panels and cohort-style workflows where
+sample identity comes from BAM read group `SM` tags or an explicit read-group
+map. With the optional `wgpu` feature, `call-targets` uses GPU aggregation by
+default and falls back to the CPU path when no compatible adapter is available.
+
+## Quick Start
+
+Build and run the test suite:
+
+```bash
+cargo build --release
+cargo test
+```
+
+Call variants in a targeted BAM:
+
+```bash
+varlock call-targets \
+  --input sample.bam \
+  --reference hg38/hg38.fa \
+  --targets panel.bed \
+  --output sample.calls.vcf.gz
+```
+
+Build with GPU support and use the same command:
+
+```bash
+cargo build --release --features wgpu
+varlock call-targets \
+  --input sample.bam \
+  --reference hg38/hg38.fa \
+  --targets panel.bed \
+  --output sample.calls.vcf.gz
+```
+
+Force CPU execution in a GPU-enabled build:
+
+```bash
+varlock call-targets --cpu \
+  --input sample.bam \
+  --reference hg38/hg38.fa \
+  --targets panel.bed
+```
 
 ## Current Commands
 
@@ -13,12 +57,25 @@ varlock --help
 
 Current subcommands:
 
-- `call-targets` - CPU SNV calling from BAMs.
-- `call-targets-gpu` - GPU-accelerated count aggregation, available when built
-  with the `wgpu` feature.
+- `call-targets` - SNV calling from BAMs. When built with the `wgpu` feature,
+  it uses GPU acceleration by default and falls back to CPU if no compatible GPU
+  is found. Pass `--cpu` to force CPU calling.
+- `call-targets-gpu` - compatibility alias for GPU-accelerated count
+  aggregation, available when built with the `wgpu` feature.
 - `annotate` - VCF annotation from VCF-like databases.
 - `filter` - INFO-based VCF filtering.
 - `intersect` - exact-key VCF intersection and difference.
+
+Most commands write bgzipped VCF output and create a CSI index by default. Use
+`--index-type tbi` when a tabix index is required.
+
+## Requirements
+
+- Rust toolchain with Cargo.
+- Input BAM files with coordinate-sorted alignments and readable headers.
+- Reference FASTA matching the BAM reference names.
+- Optional BED targets for targeted calling.
+- Optional GPU support through the `wgpu` Cargo feature.
 
 ## Build
 
@@ -27,7 +84,13 @@ cargo build
 cargo test
 ```
 
-Build with GPU support:
+Build optimized binaries:
+
+```bash
+cargo build --release
+```
+
+Build and test with GPU support:
 
 ```bash
 cargo build --release --features wgpu
@@ -38,11 +101,39 @@ During development:
 
 ```bash
 cargo run -- call-targets --help
-cargo run --features wgpu -- call-targets-gpu --help
+cargo run --features wgpu -- call-targets --help
 cargo run -- annotate --help
 cargo run -- filter --help
 cargo run -- intersect --help
 ```
+
+## Caller Overview
+
+`call-targets` performs simple SNV calling for A/C/G/T substitutions. It does
+not currently call indels, symbolic variants, or structural variants. The caller
+chooses the highest-count non-reference base at each retained site after
+summing support across samples, then writes per-sample `GT:DP:AD` fields for the
+selected ALT.
+
+Core calling inputs:
+
+| Input | Purpose |
+|---|---|
+| `--input PATH` | BAM file or directory of BAM files; repeat for multiple paths. |
+| `--bamlist FILE` | Text file with one BAM path per line. |
+| `--reference FASTA` | Reference FASTA used for sequence names and REF bases. |
+| `--targets BED` | Optional target intervals; omit to call all covered positions. |
+| `--rg-map FILE` | Optional read-group to sample TSV with `RG` and `SM` headers. |
+
+Core calling thresholds:
+
+| Option | Meaning |
+|---|---|
+| `--min-mapq` | Minimum read mapping quality. |
+| `--min-baseq` | Minimum base quality. |
+| `--min-alt-count` | Minimum selected ALT count across samples. |
+| `--min-alt-fraction` | Minimum selected ALT fraction across samples. |
+| `--max-depth` | Per-site depth cap used while accumulating counts. |
 
 ## Inputs
 
@@ -91,6 +182,10 @@ The reference may be plain FASTA or bgzipped FASTA.
 If the reference is missing the required FASTA index, `varlock` prepares a sorted
 and indexed reference beside the input reference.
 
+Reference sequence names must match the BAM header sequence names. If the
+reference is prepared automatically, the prepared FASTA is reused on later runs
+when the expected index files are already present.
+
 ## Targets And No-Target Mode
 
 Use `--targets` with a BED file for target-region calling. BED intervals are
@@ -137,6 +232,9 @@ RG001    Tumor
 RG002    Normal
 ```
 
+Use `--rg-map` when BAM headers are missing read groups, have incorrect sample
+names, or need to be overridden for a particular analysis.
+
 ## Calling Filters
 
 Common filters:
@@ -157,6 +255,10 @@ varlock call-targets \
 site. The selected ALT is the highest-count non-reference A/C/G/T base after
 summing counts across samples. Per-sample genotype fields are still written for
 the selected ALT.
+
+For tumor/normal work, use paired calling thresholds in addition to the global
+thresholds so a globally selected ALT must also satisfy tumor and normal sample
+constraints.
 
 ## Paired Calling
 
@@ -188,11 +290,11 @@ to records that pass:
 - `TUMOR_ALT_COUNT`, `NORMAL_ALT_COUNT` - selected ALT counts.
 - `TUMOR_DP`, `NORMAL_DP` - tumor and normal depths.
 
-GPU calling accepts the same paired options and uses the same output
-classification:
+GPU calling accepts the same paired options through `call-targets` when built
+with `wgpu` and uses the same output classification:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --input tumor.bam \
   --input normal.bam \
   --reference hg38/hg38.fa \
@@ -227,6 +329,18 @@ VCF records include:
 - `FORMAT/GT:DP:AD` - genotype, sample depth, and reference/alternate allele
   depths for each sample.
 
+For a selected ALT, `AD` is emitted as reference depth followed by selected ALT
+depth. Sites that do not satisfy the global filters, paired filters, or basic
+A/C/G/T constraints are not emitted.
+
+Output paths:
+
+- explicit `--output` paths are used as provided
+- without `--output`, the output name is derived from the first input or BAM
+  list path
+- CSI indexes are written as `<output>.csi`
+- TBI indexes are written as `<output>.tbi`
+
 ## GPU Calling
 
 Build with `wgpu`:
@@ -235,21 +349,31 @@ Build with `wgpu`:
 cargo build --release --features wgpu
 ```
 
-Run GPU calling:
+With `wgpu` enabled, `call-targets` tries GPU acceleration by default:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --input sample.bam \
   --reference hg38/hg38.fa \
   --targets targets.bed \
   --output sample.gpu.vcf.gz
 ```
 
-If no compatible GPU is found, `call-targets-gpu` falls back to CPU calling
-unless `--require-gpu` is set:
+Force the CPU path with `--cpu`:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
+  --cpu \
+  --input sample.bam \
+  --reference hg38/hg38.fa \
+  --targets targets.bed
+```
+
+If no compatible GPU is found, `call-targets` falls back to CPU calling unless
+`--require-gpu` is set:
+
+```bash
+varlock call-targets \
   --require-gpu \
   --input sample.bam \
   --reference hg38/hg38.fa \
@@ -259,7 +383,7 @@ varlock call-targets-gpu \
 No-target GPU calling is supported:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --input sample.bam \
   --reference hg38/hg38.fa \
   --output sample.gpu.covered.vcf.gz
@@ -270,24 +394,28 @@ and applies `--max-depth` once before output so results do not depend on flush
 threshold. The flush threshold can be tuned:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --input sample.bam \
   --reference hg38/hg38.fa \
   --obs-flush-threshold 500000
 ```
+
+GPU and CPU paths share the same sample collection, target loading, paired
+calling, and VCF output code. The GPU path accelerates count aggregation; it
+does not change the calling thresholds or output schema.
 
 ## GPU Selection And Multi-GPU Static Targets
 
 List compatible adapters:
 
 ```bash
-varlock call-targets-gpu --gpu-list
+varlock call-targets --gpu-list
 ```
 
 Select one GPU by index:
 
 ```bash
-varlock -v call-targets-gpu \
+varlock -v call-targets \
   --gpu-index 0 \
   --input sample.bam \
   --reference hg38/hg38.fa \
@@ -297,7 +425,7 @@ varlock -v call-targets-gpu \
 Select one GPU by name substring:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --gpu-name H100 \
   --input sample.bam \
   --reference hg38/hg38.fa \
@@ -307,7 +435,7 @@ varlock call-targets-gpu \
 Use multiple GPUs for static target calling by repeating `--gpu-index`:
 
 ```bash
-varlock -v call-targets-gpu \
+varlock -v call-targets \
   --gpu-index 0 \
   --gpu-index 1 \
   --gpu-index 2 \
@@ -325,7 +453,7 @@ calling is correctness-fixed but is not currently sharded across multiple GPUs.
 GPU tuning options:
 
 ```bash
-varlock call-targets-gpu \
+varlock call-targets \
   --input sample.bam \
   --reference hg38/hg38.fa \
   --targets targets.bed \
@@ -334,13 +462,18 @@ varlock call-targets-gpu \
   --obs-flush-threshold 500000
 ```
 
+GPU options are available on `call-targets` only when the binary is built with
+`--features wgpu`. The legacy `call-targets-gpu` subcommand remains available as
+a compatibility alias in GPU-enabled builds, but new examples should prefer
+`call-targets`.
+
 ## Logging
 
 Use global verbosity flags before the subcommand:
 
 ```bash
-varlock -v call-targets-gpu --input sample.bam --reference hg38/hg38.fa --targets targets.bed
-varlock -vv call-targets --input sample.bam --reference hg38/hg38.fa --targets targets.bed
+varlock -v call-targets --input sample.bam --reference hg38/hg38.fa --targets targets.bed
+varlock -vv call-targets --cpu --input sample.bam --reference hg38/hg38.fa --targets targets.bed
 ```
 
 Mirror stderr logs to a file:
@@ -351,6 +484,9 @@ varlock --log-file run.log call-targets \
   --reference hg38/hg38.fa \
   --targets targets.bed
 ```
+
+Use `-v` for high-level stage timings and GPU adapter selection. Use `-vv` when
+you need more detailed per-input scanning diagnostics.
 
 ## Variant Annotation
 
@@ -391,6 +527,15 @@ Annotation output is bgzipped VCF. Header lines are added for each destination
 INFO field and for each annotation database. Output indexes are written by
 default as CSI (`calls.annotated.vcf.gz.csi`); use `--index-type tbi` to write a
 tabix index instead.
+
+Common annotation options:
+
+| Option | Purpose |
+|---|---|
+| `--database NAME=VCF` | Register an annotation database. |
+| `--annotation NAME:SRC=DEST` | Copy an INFO field from a database into output records. |
+| `--reference FASTA` | Normalize simple indel keys before matching. |
+| `--index-type csi|tbi` | Select the output index type. |
 
 ## VCF Filtering
 
@@ -469,6 +614,9 @@ Available first-pass sample predicates are:
 
 Filter output preserves all input samples and is bgzipped VCF with a CSI index
 by default; use `--index-type tbi` to write a tabix index instead.
+
+Use `filter` after annotation or paired calling when the output VCF already
+contains INFO or FORMAT fields needed for downstream triage.
 
 ## VCF Intersection And Difference
 
@@ -593,9 +741,39 @@ Multi-set output emits records from `--emit-set` or, by default, the first set
 (`set-diff` defaults to the left side of `A-B`). Records include
 `INFO/VARLOCK_SET_COUNT` and `INFO/VARLOCK_SETS`.
 
+## Command Cheat Sheet
+
+```bash
+# Targeted calling
+varlock call-targets -i sample.bam -r hg38.fa -T targets.bed -o calls.vcf.gz
+
+# Force CPU in a GPU-enabled build
+varlock call-targets --cpu -i sample.bam -r hg38.fa -T targets.bed
+
+# List GPU adapters
+varlock call-targets --gpu-list
+
+# Paired tumor/normal calling
+varlock call-targets -i tumor.bam -i normal.bam -r hg38.fa -T targets.bed \
+  --pair tumor=Tumor,normal=Normal -o paired.vcf.gz
+
+# Annotate from a VCF-like database
+varlock annotate -i calls.vcf.gz --database db=db.vcf.gz \
+  --annotation db:AF=db_AF -o annotated.vcf.gz
+
+# Filter by INFO expression
+varlock filter -i annotated.vcf.gz --expr "db_AF < 0.01 && DP >= 20" \
+  -o rare.vcf.gz
+
+# Intersect two VCFs
+varlock intersect --left a.vcf.gz --right b.vcf.gz --mode shared \
+  -o shared.vcf.gz
+```
+
 ## Roadmap
 
-Planned features are tracked with `bd` issues.
+Planned features are tracked with `bd` issues. This section lists known follow-up
+areas rather than a complete release plan.
 
 ### Variant Intersection And Difference
 
@@ -606,13 +784,11 @@ Implemented:
 - multi-file named-set `all-shared`, `any-shared`, and `set-diff A-B`
 - matching modes: `--reference`, `--site-only`, and `--genotype-aware`
 
-Design decisions to settle before implementation:
+Follow-up:
 
-- projected VCF output vs tabular summaries
-
-Planned implementation phases:
-
-1. Add indexed/streamed multi-set evaluation for large cohorts.
+- Add indexed or streamed multi-set evaluation for large cohorts.
+- Decide whether projected VCF output or tabular summaries are needed for set
+  operations.
 
 ### Annotation Follow-Ups
 
@@ -620,7 +796,7 @@ The annotation command supports exact and reference-normalized VCF-like database
 matching, multi-ALT records, and indexed lookup for `.tbi` and `.csi` databases.
 Future work should add TSV/BED-style variant or interval database adapters.
 
-Design decisions to settle before implementation:
+Design decisions to settle before broader database support:
 
 - required database indexing and supported database formats
 - exact allele matching vs site-only annotation

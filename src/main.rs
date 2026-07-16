@@ -68,7 +68,7 @@ enum Command {
     /// Call simple SNVs from BAMs against target regions (bgzipped VCF + index)
     CallTargets(CallTargetsArgs),
 
-    /// Call simple SNVs with GPU-accelerated aggregation (requires --features wgpu)
+    /// Compatibility alias for GPU-accelerated call-targets (requires --features wgpu)
     #[cfg(feature = "wgpu")]
     CallTargetsGpu(CallTargetsGpuArgs),
 
@@ -250,6 +250,26 @@ pub enum IntersectMode {
 pub struct CallTargetsGpuArgs {
     #[command(flatten)]
     pub call: CallTargetsArgs,
+}
+
+#[cfg(feature = "wgpu")]
+#[derive(Args, Debug, Clone, Default)]
+pub struct GpuArgs {
+    /// Force the CPU call-targets path instead of trying GPU acceleration
+    #[arg(
+        long = "cpu",
+        conflicts_with_all = [
+            "gpu_list",
+            "gpu_indices",
+            "gpu_name",
+            "require_gpu",
+            "gpu_backend",
+            "matrix_budget_mib",
+            "max_obs_upload",
+            "obs_flush_threshold"
+        ]
+    )]
+    pub cpu: bool,
 
     /// List compatible GPU adapters and exit
     #[arg(long = "gpu-list")]
@@ -288,8 +308,9 @@ pub struct CallTargetsGpuArgs {
 }
 
 #[cfg(feature = "wgpu")]
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum GpuBackend {
+    #[default]
     All,
     Vulkan,
     Metal,
@@ -327,6 +348,10 @@ pub struct CallTargetsArgs {
     /// Read-group to sample mapping TSV with RG and SM headers
     #[arg(long = "rg-map", value_name = "FILE")]
     pub rg_map: Option<PathBuf>,
+
+    #[cfg(feature = "wgpu")]
+    #[command(flatten)]
+    pub gpu: GpuArgs,
 
     /// Index type for VCF.gz output
     #[arg(long = "index-type", value_name = "TYPE", value_enum, default_value_t = IndexType::Csi)]
@@ -439,7 +464,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::CallTargets(args) => call_targets::run(args, &ctx),
         #[cfg(feature = "wgpu")]
-        Command::CallTargetsGpu(args) => call_targets::gpu::run(args, &ctx),
+        Command::CallTargetsGpu(args) => call_targets::run(args.call, &ctx),
         Command::Annotate(args) => annotate::run(args, &ctx),
         Command::Filter(args) => filter::run(args, &ctx),
         Command::Intersect(args) => intersect::run(args, &ctx),
