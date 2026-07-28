@@ -22,7 +22,7 @@ use noodles_sam as sam;
 
 use crate::{CallTargetsArgs, ExecutionContext, log_verbose};
 use pileup::{InputResult, PileupSettings, ScanParams, merge_counts, process_input_bam};
-use samples::{collect_samples, read_rg_map};
+use samples::{collect_sample_resolution, read_rg_map};
 use targets::load_targets;
 use types::{
     Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets, SiteCounts, SiteKey,
@@ -65,10 +65,9 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
 
     let scan_started = Instant::now();
     let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
-    for path in &prepared.inputs {
+    for (path, sample_resolver) in prepared.inputs.iter().zip(&prepared.input_sample_resolvers) {
         let scan = ScanParams {
-            rg_to_sm: &prepared.rg_to_sm,
-            sample_index_map: &prepared.sample_index,
+            sample_resolver,
             min_mapq: args.min_mapq,
             verbose: ctx.verbose,
             pileup: PileupSettings {
@@ -200,29 +199,42 @@ pub(crate) fn prepare_call_targets(
     );
 
     let stage_started = Instant::now();
+    if args.rg_map.is_some() && args.split_by != crate::SplitBy::Sm {
+        bail!("--rg-map is only supported with --split-by sm");
+    }
     let rg_map = args
         .rg_map
         .as_ref()
         .map(|path| read_rg_map(path.as_path()))
         .transpose()?;
-    let (sample_names, rg_to_sm) = collect_samples(&inputs, rg_map.as_deref())?;
+    let sample_resolution = collect_sample_resolution(&inputs, args.split_by, rg_map.as_deref())?;
     log_verbose(
         ctx,
         format!(
             "{label} stage=collect_samples samples={} elapsed={:.2?}",
-            sample_names.len(),
+            sample_resolution.sample_names.len(),
             stage_started.elapsed()
         ),
     );
-    let sample_index = sample_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.clone(), i))
-        .collect::<HashMap<_, _>>();
-    let paired = prepare_paired_calling(args, &sample_index)?;
+    let paired = prepare_paired_calling(args, &sample_resolution.sample_index)?;
 
     log_verbose(ctx, format!("{label} inputs: {} BAMs", inputs.len()));
-    log_verbose(ctx, format!("{label} samples: {:?}", sample_names));
+    log_verbose(
+        ctx,
+        format!(
+            "{label} samples (--split-by {:?}): {:?}",
+            args.split_by, sample_resolution.sample_names
+        ),
+    );
+    for resolver in &sample_resolution.input_resolvers {
+        log_verbose(
+            ctx,
+            format!(
+                "{label} sample source: {}",
+                resolver.describe(&sample_resolution.sample_names)
+            ),
+        );
+    }
     if let Some(paired) = &paired {
         log_verbose(
             ctx,
@@ -243,9 +255,8 @@ pub(crate) fn prepare_call_targets(
         inputs,
         ref_names,
         targets,
-        sample_names,
-        rg_to_sm,
-        sample_index,
+        sample_names: sample_resolution.sample_names,
+        input_sample_resolvers: sample_resolution.input_resolvers,
         paired,
     })
 }
@@ -408,6 +419,7 @@ mod tests {
             targets: None,
             output: None,
             rg_map: None,
+            split_by: crate::SplitBy::Sm,
             #[cfg(feature = "wgpu")]
             gpu: crate::GpuArgs::default(),
             index_type: IndexType::Csi,

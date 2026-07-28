@@ -60,6 +60,19 @@ fn call_targets_help_lists_pair_flags() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn call_targets_help_lists_split_by() -> Result<()> {
+    let output = run_varlock(&["call-targets", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--split-by <MODE>"));
+    assert!(stdout.contains("sm"));
+    assert!(stdout.contains("rg"));
+    assert!(stdout.contains("file"));
+    Ok(())
+}
+
 #[cfg(feature = "wgpu")]
 #[test]
 fn call_targets_help_lists_gpu_controls() -> Result<()> {

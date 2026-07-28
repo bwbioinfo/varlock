@@ -667,6 +667,7 @@ mod tests {
             targets: None,
             output: None,
             rg_map: None,
+            split_by: crate::SplitBy::Sm,
             #[cfg(feature = "wgpu")]
             gpu: crate::GpuArgs::default(),
             index_type: IndexType::Csi,
