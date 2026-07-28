@@ -31,4 +31,5 @@ libc = "0.2"
 wgpu = { version = "28", optional = true }
 
 [dev-dependencies]
+noodles-vcf = "0.85"
 tempfile = "3"
