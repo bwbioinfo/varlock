@@ -66,7 +66,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Add missing SM tags to BAM read groups and write a reindexed BAM
+    /// Add or repair BAM read groups with SM tags and write a reindexed BAM
     AddSmToBam(AddSmToBamArgs),
 
     /// Call simple SNVs from BAMs against target regions (bgzipped VCF + index)

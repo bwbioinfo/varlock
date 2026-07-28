@@ -9,7 +9,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use noodles_bam as bam;
-use noodles_sam::header::record::value::map::read_group::tag::SAMPLE;
+use noodles_sam::{
+    alignment::{RecordBuf, record::data::field::Tag, record_buf::data::field::Value},
+    header::record::value::map::read_group::tag::SAMPLE,
+};
 use tempfile::tempdir;
 
 use support::call_targets::BamFixtureBuilder;
@@ -59,6 +62,28 @@ fn observed_bases(path: &Path) -> Result<Vec<u8>> {
         .map(|result| result.map(|record| record.sequence().get(0).unwrap_or(b'N')))
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+fn record_read_group_ids(path: &Path) -> Result<Vec<Option<String>>> {
+    let mut reader = bam::io::Reader::new(
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
+    );
+    let header = reader.read_header()?;
+
+    reader
+        .records()
+        .map(|result| {
+            let record = result?;
+            let record = RecordBuf::try_from_alignment_record(&header, &record)?;
+            match record.data().get(&Tag::READ_GROUP) {
+                Some(Value::String(value)) | Some(Value::Hex(value)) => {
+                    Ok(Some(std::str::from_utf8(value.as_ref())?.to_owned()))
+                }
+                Some(_) => anyhow::bail!("RG tag has unexpected type"),
+                None => Ok(None),
+            }
+        })
+        .collect()
 }
 
 #[test]
@@ -161,7 +186,7 @@ fn add_sm_to_bam_uses_explicit_sample_for_missing_tags() -> Result<()> {
 }
 
 #[test]
-fn add_sm_to_bam_rejects_bams_without_read_groups_before_writing_output() -> Result<()> {
+fn add_sm_to_bam_creates_a_read_group_for_headerless_bams() -> Result<()> {
     let dir = tempdir()?;
     let input = dir.path().join("no-read-groups.bam");
     let output = dir.path().join("output.bam");
@@ -177,9 +202,88 @@ fn add_sm_to_bam_rejects_bams_without_read_groups_before_writing_output() -> Res
         "--output",
         output.to_str().context("invalid output path")?,
     ])?;
-    assert!(!result.status.success(), "{}", output_text(&result));
-    assert!(output_text(&result).contains("does not contain any @RG records"));
-    assert!(!output.exists());
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    let mut reader = bam::io::Reader::new(File::open(&output)?);
+    let header = reader.read_header()?;
+    assert_eq!(header.read_groups().len(), 1);
+    assert_eq!(
+        sample_tag(&header, "no-read-groups"),
+        Some(&b"no-read-groups"[..])
+    );
+    assert_eq!(
+        record_read_group_ids(&output)?,
+        vec![Some("no-read-groups".to_string())]
+    );
+    assert_eq!(observed_bases(&output)?, observed_bases(&fixture.path)?);
+    assert!(output.with_extension("bam.bai").exists());
+
+    Ok(())
+}
+
+#[test]
+fn add_sm_to_bam_creates_headers_for_orphan_record_read_groups() -> Result<()> {
+    let dir = tempdir()?;
+    let input = dir.path().join("orphan-groups.bam");
+    let output = dir.path().join("output.bam");
+
+    let mut builder = BamFixtureBuilder::new("chr1", 20);
+    builder.add_observations(5, b'A', 1, Some("lane-a"));
+    builder.add_observations(5, b'C', 1, Some("lane-b"));
+    let fixture = builder.write(&input)?;
+
+    let result = run_varlock(&[
+        "add-sm-to-bam",
+        "--input",
+        fixture.path.to_str().context("invalid input path")?,
+        "--output",
+        output.to_str().context("invalid output path")?,
+    ])?;
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    let mut reader = bam::io::Reader::new(File::open(&output)?);
+    let header = reader.read_header()?;
+    assert_eq!(sample_tag(&header, "lane-a"), Some(&b"orphan-groups"[..]));
+    assert_eq!(sample_tag(&header, "lane-b"), Some(&b"orphan-groups"[..]));
+    assert_eq!(
+        record_read_group_ids(&output)?,
+        vec![Some("lane-a".to_string()), Some("lane-b".to_string())]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn add_sm_to_bam_tags_only_untagged_records_when_repairing_headers() -> Result<()> {
+    let dir = tempdir()?;
+    let input = dir.path().join("mixed-groups.bam");
+    let output = dir.path().join("output.bam");
+
+    let mut builder = BamFixtureBuilder::new("chr1", 20);
+    builder.add_observations(5, b'A', 1, Some("lane-a"));
+    builder.add_observations(5, b'C', 1, None);
+    let fixture = builder.write(&input)?;
+
+    let result = run_varlock(&[
+        "add-sm-to-bam",
+        "--input",
+        fixture.path.to_str().context("invalid input path")?,
+        "--output",
+        output.to_str().context("invalid output path")?,
+    ])?;
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    let mut reader = bam::io::Reader::new(File::open(&output)?);
+    let header = reader.read_header()?;
+    assert_eq!(sample_tag(&header, "lane-a"), Some(&b"mixed-groups"[..]));
+    assert_eq!(
+        sample_tag(&header, "mixed-groups"),
+        Some(&b"mixed-groups"[..])
+    );
+    assert_eq!(
+        record_read_group_ids(&output)?,
+        vec![Some("lane-a".to_string()), Some("mixed-groups".to_string())]
+    );
 
     Ok(())
 }

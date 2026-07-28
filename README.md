@@ -116,6 +116,11 @@ streaming the alignments into a new BAM. It never rewrites the input in place,
 preserves existing `SM` tags, and writes a fresh `.bam.bai` index for the output.
 By default, the added sample value is the input BAM filename stem.
 
+For BAMs without `@RG` records, the command repairs the read-group metadata. It
+creates header entries for any existing record-level `RG` tags. If retained reads
+lack an `RG` tag, it creates one default read group named after the input filename
+stem and tags those reads with it. All synthesized groups receive the same `SM`.
+
 ```bash
 # Adds SM:cohort-01 to read groups without SM and writes rewritten.bam.bai.
 varlock add-sm-to-bam \
@@ -132,8 +137,8 @@ varlock add-sm-to-bam \
   --sample patient-42
 ```
 
-The command requires at least one `@RG` record. It does not invent read-group
-IDs for BAMs that have none.
+This makes headerless BAMs usable with tools that resolve samples through `RG` and
+`SM`, including `varlock call-targets`.
 
 ## Caller Overview
 
