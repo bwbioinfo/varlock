@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
     fs::File,
     path::{Path, PathBuf},
     sync::{
@@ -19,7 +18,8 @@ use noodles_sam::alignment::{record::cigar::Op, record::cigar::op::Kind};
 
 use crate::call_targets::{
     observation::{Observation, TargetFrontierIndex, TargetSiteMap},
-    pileup::{record_sample, should_skip_record},
+    pileup::should_skip_record,
+    samples::InputSampleResolver,
     types::{SiteKey, base_index},
 };
 
@@ -65,8 +65,7 @@ pub(crate) enum CoveredScanEvent {
 
 #[derive(Clone)]
 pub(crate) struct ScanWorkerParams {
-    pub(crate) rg_to_sm: Arc<HashMap<String, String>>,
-    pub(crate) sample_index: Arc<HashMap<String, usize>>,
+    pub(crate) input_sample_resolvers: Arc<Vec<InputSampleResolver>>,
     pub(crate) min_mapq: u8,
     pub(crate) min_baseq: u8,
     pub(crate) max_depth: u32,
@@ -145,6 +144,10 @@ pub(crate) fn scan_bam_worker(
     frontier_index: &TargetFrontierIndex,
     scan_tx: SyncSender<ScanEvent>,
 ) -> Result<()> {
+    let sample_resolver = params
+        .input_sample_resolvers
+        .get(input_idx)
+        .with_context(|| format!("missing sample resolver for input {}", path.display()))?;
     let started = Instant::now();
     if params.verbose > 1 {
         eprintln!("[call_targets_gpu] scanning input {}", path.display());
@@ -207,11 +210,7 @@ pub(crate) fn scan_bam_worker(
             continue;
         }
 
-        let Some(sm) = record_sample(&record, &params.rg_to_sm)? else {
-            skipped_rg += 1;
-            continue;
-        };
-        let Some(sample_index) = params.sample_index.get(sm).copied() else {
+        let Some(sample_index) = sample_resolver.resolve_record(&record)? else {
             skipped_rg += 1;
             continue;
         };
@@ -294,6 +293,10 @@ pub(crate) fn scan_bam_covered_worker(
     params: &ScanWorkerParams,
     scan_tx: SyncSender<CoveredScanEvent>,
 ) -> Result<()> {
+    let sample_resolver = params
+        .input_sample_resolvers
+        .get(input_idx)
+        .with_context(|| format!("missing sample resolver for input {}", path.display()))?;
     let started = Instant::now();
     if params.verbose > 1 {
         eprintln!("[call_targets_gpu] scanning input {}", path.display());
@@ -331,11 +334,7 @@ pub(crate) fn scan_bam_covered_worker(
             }
         };
 
-        let Some(sm) = record_sample(&record, &params.rg_to_sm)? else {
-            skipped_rg += 1;
-            continue;
-        };
-        let Some(sample_index) = params.sample_index.get(sm).copied() else {
+        let Some(sample_index) = sample_resolver.resolve_record(&record)? else {
             skipped_rg += 1;
             continue;
         };

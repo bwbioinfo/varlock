@@ -262,8 +262,7 @@ fn run_static_target_gpu_path(
 
     let scan_started = Instant::now();
     let scan_params = ScanWorkerParams {
-        rg_to_sm: Arc::new(prepared.rg_to_sm.clone()),
-        sample_index: Arc::new(prepared.sample_index.clone()),
+        input_sample_resolvers: Arc::new(prepared.input_sample_resolvers.clone()),
         min_mapq: args.call.min_mapq,
         min_baseq: args.call.min_baseq,
         max_depth: args.call.max_depth,
@@ -371,8 +370,7 @@ fn run_covered_gpu_path(
 
     let scan_started = Instant::now();
     let scan_params = ScanWorkerParams {
-        rg_to_sm: Arc::new(prepared.rg_to_sm.clone()),
-        sample_index: Arc::new(prepared.sample_index.clone()),
+        input_sample_resolvers: Arc::new(prepared.input_sample_resolvers.clone()),
         min_mapq: args.call.min_mapq,
         min_baseq: args.call.min_baseq,
         max_depth: args.call.max_depth,

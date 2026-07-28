@@ -1,17 +1,11 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fs::File,
-    path::Path,
-    time::Instant,
-};
+use std::{collections::BTreeMap, fs::File, path::Path, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use noodles_bam as bam;
 use noodles_bam::io::Reader;
-use noodles_sam::alignment::record::data::field::{Tag, Value};
 use noodles_sam::alignment::{record::cigar::Op, record::cigar::op::Kind};
 
-use super::samples::DEFAULT_SAMPLE_NAME;
+use super::samples::InputSampleResolver;
 use super::targets::in_targets;
 use super::types::{SiteCounts, SiteKey, TargetIndex, base_index};
 
@@ -23,8 +17,7 @@ pub(crate) struct PileupSettings<'a> {
 }
 
 pub(crate) struct ScanParams<'a> {
-    pub(crate) rg_to_sm: &'a HashMap<String, String>,
-    pub(crate) sample_index_map: &'a HashMap<String, usize>,
+    pub(crate) sample_resolver: &'a InputSampleResolver,
     pub(crate) min_mapq: u8,
     pub(crate) verbose: u8,
     pub(crate) pileup: PileupSettings<'a>,
@@ -83,11 +76,7 @@ pub(crate) fn process_input_bam(path: &Path, scan: &ScanParams<'_>) -> Result<In
             continue;
         }
 
-        let Some(sm) = record_sample(&record, scan.rg_to_sm)? else {
-            skipped_rg += 1;
-            continue;
-        };
-        let Some(sample_index) = scan.sample_index_map.get(sm).copied() else {
+        let Some(sample_index) = scan.sample_resolver.resolve_record(&record)? else {
             skipped_rg += 1;
             continue;
         };
@@ -250,25 +239,6 @@ pub(crate) fn should_skip_record(record: &bam::Record) -> bool {
         || flags.is_duplicate()
 }
 
-pub(crate) fn record_sample<'a>(
-    record: &bam::Record,
-    rg_to_sm: &'a HashMap<String, String>,
-) -> Result<Option<&'a str>> {
-    if rg_to_sm.is_empty() {
-        return Ok(Some(DEFAULT_SAMPLE_NAME));
-    }
-
-    match record.data().get(&Tag::READ_GROUP) {
-        None => Ok(None),
-        Some(Ok(Value::String(value))) | Some(Ok(Value::Hex(value))) => {
-            let rg = std::str::from_utf8(value.as_ref()).context("invalid RG tag")?;
-            Ok(rg_to_sm.get(rg).map(|s| s.as_str()))
-        }
-        Some(Ok(_)) => bail!("RG tag has unexpected type"),
-        Some(Err(e)) => Err(e).context("failed to read RG tag"),
-    }
-}
-
 fn pileup_record(
     record: &bam::Record,
     reference_sequence_id: usize,
@@ -350,15 +320,10 @@ fn pileup_record(
 
 #[cfg(test)]
 mod tests {
-    use super::super::samples::DEFAULT_SAMPLE_NAME;
     use super::super::types::{SiteCounts, SiteKey};
-    use super::{
-        cap_counts, merge_counts, merge_counts_uncapped, merge_sample_counts_with_cap,
-        record_sample,
-    };
+    use super::{cap_counts, merge_counts, merge_counts_uncapped, merge_sample_counts_with_cap};
     use anyhow::Result;
-    use noodles_bam as bam;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     fn site(ref_id: usize, pos: u32) -> SiteKey {
         SiteKey {
@@ -476,18 +441,6 @@ mod tests {
         assert_eq!(
             split[&site(0, 1)].per_sample[0],
             single[&site(0, 1)].per_sample[0]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn record_sample_uses_default_sample_when_rg_mapping_is_empty() -> Result<()> {
-        let record = bam::Record::default();
-        let rg_to_sm = HashMap::new();
-
-        assert_eq!(
-            record_sample(&record, &rg_to_sm)?,
-            Some(DEFAULT_SAMPLE_NAME)
         );
         Ok(())
     }

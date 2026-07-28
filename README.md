@@ -5,10 +5,11 @@ and variant set comparison. The calling workflow reads one or more BAM files,
 counts A/C/G/T support at target sites or all covered positions, and writes a
 bgzipped VCF plus an index.
 
-The caller is designed for targeted panels and cohort-style workflows where
-sample identity comes from BAM read group `SM` tags or an explicit read-group
-map. With the optional `wgpu` feature, `call-targets` uses GPU aggregation by
-default and falls back to the CPU path when no compatible adapter is available.
+The caller is designed for targeted panels and cohort-style workflows. Sample
+identity can come from BAM read group `SM` tags, input BAM files, input-local
+read groups, or an explicit read-group map. With the optional `wgpu` feature,
+`call-targets` uses GPU aggregation by default and falls back to the CPU path
+when no compatible adapter is available.
 
 ## Quick Start
 
@@ -123,6 +124,7 @@ Core calling inputs:
 | `--bamlist FILE` | Text file with one BAM path per line. |
 | `--reference FASTA` | Reference FASTA used for sequence names and REF bases. |
 | `--targets BED` | Optional target intervals; omit to call all covered positions. |
+| `--split-by MODE` | VCF sample identity policy: `sm` (default), `file`, or `rg`. |
 | `--rg-map FILE` | Optional read-group to sample TSV with `RG` and `SM` headers. |
 
 Core calling thresholds:
@@ -209,8 +211,45 @@ varlock call-targets \
 
 ## Samples And Read Groups
 
-By default, `varlock` uses BAM read group `SM` tags to determine samples. If a
-BAM has no read group/sample mapping, it is treated as one default sample.
+`--split-by sm` is the default and preserves the existing SM-based behavior:
+read groups with the same BAM-header `SM` value share a VCF sample column. If
+every input lacks `SM`, all reads use one `SAMPLE` column. Reused RG IDs are
+resolved per input BAM, so the same RG ID can map to different `SM` values in
+different BAMs. If only some inputs lack `SM`, reads without an SM mapping use
+that input's VCF-safe filename stem rather than being dropped.
+
+Use `--split-by file` for one VCF sample column per BAM, regardless of header
+tags. This is the recommended choice when each input BAM is one biological
+sample but its `@RG` records omit `SM`:
+
+```bash
+varlock call-targets \
+  --input tumor.bam \
+  --input normal.bam \
+  --reference hg38/hg38.fa \
+  --targets targets.bed \
+  --split-by file \
+  --output paired.calls.vcf.gz
+```
+
+The resulting sample labels are VCF-safe filename stems, such as `tumor` and
+`normal`; duplicate stems receive deterministic suffixes (`sample`,
+`sample_2`).
+
+Use `--split-by rg` when lanes or libraries need independent columns. Each
+column is named `file-stem__rg-id`, so repeated RG IDs from different BAMs stay
+distinct. Every retained read must have an RG tag declared by that input BAM;
+missing or unknown tags stop the command before output is written.
+
+```bash
+varlock call-targets \
+  --input cohort_a.bam \
+  --input cohort_b.bam \
+  --reference hg38/hg38.fa \
+  --targets targets.bed \
+  --split-by rg \
+  --output lanes.calls.vcf.gz
+```
 
 Provide an explicit read-group to sample map with `--rg-map`:
 
@@ -232,8 +271,11 @@ RG001    Tumor
 RG002    Normal
 ```
 
-Use `--rg-map` when BAM headers are missing read groups, have incorrect sample
-names, or need to be overridden for a particular analysis.
+Use `--rg-map` with `--split-by sm` when BAM headers have incorrect sample
+names or need to be overridden for a particular analysis. The TSV must have
+exactly `RG` and `SM` headers and two fields on every data row. `--rg-map` is
+not accepted with `--split-by file` or `--split-by rg`, because a two-column
+map cannot disambiguate duplicate RG IDs across inputs.
 
 ## Calling Filters
 
@@ -264,7 +306,8 @@ constraints.
 
 Use `--pair tumor=SAMPLE,normal=SAMPLE` to filter calls through one tumor/normal
 pair after the global ALT has been selected. The tumor and normal names must
-match sample names from BAM `RG/SM` tags or `--rg-map`.
+match resolved sample labels from `--split-by sm`, `--split-by file`, or
+`--split-by rg`.
 
 ```bash
 varlock call-targets \

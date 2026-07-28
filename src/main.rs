@@ -318,6 +318,17 @@ pub enum GpuBackend {
     Gl,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum SplitBy {
+    /// Merge BAM read groups with the same SM tag.
+    #[default]
+    Sm,
+    /// Write one sample column for each input BAM read group.
+    Rg,
+    /// Write one sample column for each input BAM.
+    File,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct CallTargetsArgs {
     /// BAM input paths (files or directories; directories are searched recursively)
@@ -348,6 +359,10 @@ pub struct CallTargetsArgs {
     /// Read-group to sample mapping TSV with RG and SM headers
     #[arg(long = "rg-map", value_name = "FILE")]
     pub rg_map: Option<PathBuf>,
+
+    /// Assign VCF sample columns by BAM SM tags, input BAM, or input-local read group
+    #[arg(long = "split-by", value_name = "MODE", value_enum, default_value_t = SplitBy::Sm)]
+    pub split_by: SplitBy,
 
     #[cfg(feature = "wgpu")]
     #[command(flatten)]

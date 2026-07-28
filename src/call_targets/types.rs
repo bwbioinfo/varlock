@@ -1,5 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use super::samples::InputSampleResolver;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct SiteKey {
     pub(crate) reference_sequence_id: usize,
@@ -28,8 +30,7 @@ pub(crate) struct PreparedCallTargets {
     pub(crate) ref_names: Vec<String>,
     pub(crate) targets: TargetIndex,
     pub(crate) sample_names: Vec<String>,
-    pub(crate) rg_to_sm: HashMap<String, String>,
-    pub(crate) sample_index: HashMap<String, usize>,
+    pub(crate) input_sample_resolvers: Vec<InputSampleResolver>,
     #[allow(dead_code)]
     pub(crate) paired: Option<PairedCallingConfig>,
 }
