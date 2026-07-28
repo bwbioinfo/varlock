@@ -58,6 +58,7 @@ varlock --help
 
 Current subcommands:
 
+- `add-sm-to-bam` - fill missing `SM` tags in BAM read-group headers and write a reindexed BAM.
 - `call-targets` - SNV calling from BAMs. When built with the `wgpu` feature,
   it uses GPU acceleration by default and falls back to CPU if no compatible GPU
   is found. Pass `--cpu` to force CPU calling.
@@ -107,6 +108,32 @@ cargo run -- annotate --help
 cargo run -- filter --help
 cargo run -- intersect --help
 ```
+
+## Add SM To BAM
+
+`add-sm-to-bam` fills missing `SM` tags on existing `@RG` header records while
+streaming the alignments into a new BAM. It never rewrites the input in place,
+preserves existing `SM` tags, and writes a fresh `.bam.bai` index for the output.
+By default, the added sample value is the input BAM filename stem.
+
+```bash
+# Adds SM:cohort-01 to read groups without SM and writes rewritten.bam.bai.
+varlock add-sm-to-bam \
+  --input cohort-01.bam \
+  --output rewritten.bam
+```
+
+Use `--sample` to choose the value explicitly:
+
+```bash
+varlock add-sm-to-bam \
+  --input lane.bam \
+  --output sample.bam \
+  --sample patient-42
+```
+
+The command requires at least one `@RG` record. It does not invent read-group
+IDs for BAMs that have none.
 
 ## Caller Overview
 
