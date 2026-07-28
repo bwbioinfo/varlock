@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 
+mod add_sm_to_bam;
 mod annotate;
 mod call_targets;
 mod fasta_prep;
@@ -65,6 +66,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Add or repair BAM read groups with SM tags and write a reindexed BAM
+    AddSmToBam(AddSmToBamArgs),
+
     /// Call simple SNVs from BAMs against target regions (bgzipped VCF + index)
     CallTargets(CallTargetsArgs),
 
@@ -80,6 +84,21 @@ enum Command {
 
     /// Intersect or subtract variants across VCFs or sample groups
     Intersect(IntersectArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AddSmToBamArgs {
+    /// Input BAM path
+    #[arg(short = 'i', long = "input", value_name = "BAM")]
+    pub input: PathBuf,
+
+    /// Output BAM path; must differ from input
+    #[arg(short = 'o', long = "output", value_name = "BAM")]
+    pub output: PathBuf,
+
+    /// SM value for read groups that lack one (default: input BAM filename stem)
+    #[arg(long = "sample", value_name = "SM")]
+    pub sample: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -477,6 +496,7 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
+        Command::AddSmToBam(args) => add_sm_to_bam::run(args, &ctx),
         Command::CallTargets(args) => call_targets::run(args, &ctx),
         #[cfg(feature = "wgpu")]
         Command::CallTargetsGpu(args) => call_targets::run(args.call, &ctx),

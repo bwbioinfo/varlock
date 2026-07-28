@@ -29,10 +29,23 @@ fn top_level_help_lists_core_commands() -> Result<()> {
     assert!(output.status.success(), "{}", output_text(&output));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("add-sm-to-bam"));
     assert!(stdout.contains("call-targets"));
     assert!(stdout.contains("annotate"));
     assert!(stdout.contains("filter"));
     assert!(stdout.contains("intersect"));
+    Ok(())
+}
+
+#[test]
+fn add_sm_to_bam_help_lists_input_output_and_sample() -> Result<()> {
+    let output = run_varlock(&["add-sm-to-bam", "--help"])?;
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--input <BAM>"));
+    assert!(stdout.contains("--output <BAM>"));
+    assert!(stdout.contains("--sample <SM>"));
     Ok(())
 }
 
