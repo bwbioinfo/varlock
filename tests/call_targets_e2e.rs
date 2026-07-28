@@ -37,14 +37,20 @@ fn call_targets_command(
     extra_args: &[&str],
 ) -> Command {
     call_targets_command_with_backend(
-        bams, reference, targets, output, index_type, extra_args, true,
+        bams,
+        reference,
+        Some(targets),
+        output,
+        index_type,
+        extra_args,
+        true,
     )
 }
 
 fn call_targets_command_with_backend(
     bams: &[&Path],
     reference: &Path,
-    targets: &Path,
+    targets: Option<&Path>,
     output: &Path,
     index_type: &str,
     extra_args: &[&str],
@@ -61,11 +67,11 @@ fn call_targets_command_with_backend(
     for bam in bams {
         command.arg("--input").arg(bam);
     }
+    command.arg("--reference").arg(reference);
+    if let Some(targets) = targets {
+        command.arg("--targets").arg(targets);
+    }
     command
-        .arg("--reference")
-        .arg(reference)
-        .arg("--targets")
-        .arg(targets)
         .arg("--output")
         .arg(output)
         .arg("--index-type")
@@ -110,6 +116,27 @@ fn sample_depth(parsed: &support::call_targets::ParsedVcf, sample_name: &str) ->
     match sample.get("DP") {
         Some(Some(SampleValue::Integer(depth))) => Ok(*depth),
         value => anyhow::bail!("expected integer DP for {sample_name}, got {value:?}"),
+    }
+}
+
+fn sample_allele_depths(
+    parsed: &support::call_targets::ParsedVcf,
+    sample_name: &str,
+) -> Result<Vec<i32>> {
+    let [record] = parsed.records.as_slice() else {
+        anyhow::bail!("expected one VCF record, got {}", parsed.records.len());
+    };
+    let sample = record
+        .samples()
+        .get(&parsed.header, sample_name)
+        .with_context(|| format!("missing {sample_name} values"))?;
+    match sample.get("AD") {
+        Some(Some(SampleValue::Array(SampleArray::Integer(values)))) => values
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .context("expected integer allele depths"),
+        value => anyhow::bail!("expected integer AD values for {sample_name}, got {value:?}"),
     }
 }
 
@@ -340,6 +367,55 @@ fn call_targets_sm_keeps_inputs_without_sm_when_other_inputs_have_sm() -> Result
 }
 
 #[test]
+fn call_targets_max_depth_is_input_order_independent() -> Result<()> {
+    let dir = tempdir()?;
+    let reference = write_fasta(
+        dir.path().join("reference.fa"),
+        &[("chr1", b"AAAAAAAAAAAAAAAAAAAA")],
+    )?;
+    let targets = write_bed(dir.path().join("targets.bed"), &[("chr1", 4, 5)])?;
+
+    let mut reference_reads = BamFixtureBuilder::new("chr1", 20);
+    reference_reads.add_read_group("first", Some("sample"));
+    reference_reads.add_observations(5, b'A', 6, Some("first"));
+    let reference_reads = reference_reads.write(dir.path().join("reference.bam"))?;
+
+    let mut alternate_reads = BamFixtureBuilder::new("chr1", 20);
+    alternate_reads.add_read_group("second", Some("sample"));
+    alternate_reads.add_observations(5, b'C', 6, Some("second"));
+    let alternate_reads = alternate_reads.write(dir.path().join("alternate.bam"))?;
+
+    let forward_output = dir.path().join("forward.vcf.gz");
+    run_call_targets(
+        &[&reference_reads.path, &alternate_reads.path],
+        &reference.path,
+        &targets,
+        &forward_output,
+        "csi",
+        &["--max-depth", "5"],
+    )?;
+    let reverse_output = dir.path().join("reverse.vcf.gz");
+    run_call_targets(
+        &[&alternate_reads.path, &reference_reads.path],
+        &reference.path,
+        &targets,
+        &reverse_output,
+        "csi",
+        &["--max-depth", "5"],
+    )?;
+
+    let forward = read_vcf(&forward_output)?;
+    let reverse = read_vcf(&reverse_output)?;
+    for parsed in [&forward, &reverse] {
+        assert_eq!(sample_names(parsed), ["sample"]);
+        assert_eq!(sample_depth(parsed, "sample")?, 5);
+        assert_eq!(sample_allele_depths(parsed, "sample")?, [3, 2]);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn call_targets_accepts_rg_map_only_with_sm_split_by() -> Result<()> {
     let dir = tempdir()?;
     let reference = write_fasta(
@@ -468,7 +544,7 @@ fn call_targets_gpu_static_path_matches_cpu_sample_resolution() -> Result<()> {
     let result = call_targets_command_with_backend(
         &[&first.path, &second.path],
         &reference.path,
-        &targets,
+        Some(&targets),
         &gpu_output,
         "csi",
         &["--split-by", "rg"],
@@ -485,6 +561,94 @@ fn call_targets_gpu_static_path_matches_cpu_sample_resolution() -> Result<()> {
             sample_depth(&gpu, sample_name)?,
             sample_depth(&cpu, sample_name)?
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn call_targets_gpu_paths_match_cpu_after_depth_capping() -> Result<()> {
+    let dir = tempdir()?;
+    let reference = write_fasta(
+        dir.path().join("reference.fa"),
+        &[("chr1", b"AAAAAAAAAAAAAAAAAAAA")],
+    )?;
+    let targets = write_bed(dir.path().join("targets.bed"), &[("chr1", 4, 5)])?;
+
+    let mut reference_reads = BamFixtureBuilder::new("chr1", 20);
+    reference_reads.add_read_group("first", Some("sample"));
+    reference_reads.add_observations(5, b'A', 6, Some("first"));
+    let reference_reads = reference_reads.write(dir.path().join("reference.bam"))?;
+
+    let mut alternate_reads = BamFixtureBuilder::new("chr1", 20);
+    alternate_reads.add_read_group("second", Some("sample"));
+    alternate_reads.add_observations(5, b'C', 6, Some("second"));
+    let alternate_reads = alternate_reads.write(dir.path().join("alternate.bam"))?;
+
+    let inputs = [
+        reference_reads.path.as_path(),
+        alternate_reads.path.as_path(),
+    ];
+    let cpu_static_output = dir.path().join("cpu-static.vcf.gz");
+    run_call_targets(
+        &inputs,
+        &reference.path,
+        &targets,
+        &cpu_static_output,
+        "csi",
+        &["--max-depth", "5"],
+    )?;
+
+    let gpu_static_output = dir.path().join("gpu-static.vcf.gz");
+    let result = call_targets_command_with_backend(
+        &inputs,
+        &reference.path,
+        Some(&targets),
+        &gpu_static_output,
+        "csi",
+        &["--max-depth", "5"],
+        false,
+    )
+    .output()?;
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    let cpu_covered_output = dir.path().join("cpu-covered.vcf.gz");
+    let result = call_targets_command_with_backend(
+        &inputs,
+        &reference.path,
+        None,
+        &cpu_covered_output,
+        "csi",
+        &["--max-depth", "5"],
+        true,
+    )
+    .output()?;
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    let gpu_covered_output = dir.path().join("gpu-covered.vcf.gz");
+    let result = call_targets_command_with_backend(
+        &inputs,
+        &reference.path,
+        None,
+        &gpu_covered_output,
+        "csi",
+        &["--max-depth", "5", "--obs-flush-threshold", "1"],
+        false,
+    )
+    .output()?;
+    assert!(result.status.success(), "{}", output_text(&result));
+
+    for output in [
+        &cpu_static_output,
+        &gpu_static_output,
+        &cpu_covered_output,
+        &gpu_covered_output,
+    ] {
+        let parsed = read_vcf(output)?;
+        assert_eq!(sample_names(&parsed), ["sample"]);
+        assert_eq!(sample_depth(&parsed, "sample")?, 5);
+        assert_eq!(sample_allele_depths(&parsed, "sample")?, [3, 2]);
     }
 
     Ok(())

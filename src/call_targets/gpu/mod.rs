@@ -32,7 +32,7 @@ use super::{
     derive_output,
     observation::{self, build_target_frontier_index, build_target_site_map},
     output,
-    pileup::{cap_counts, merge_counts_uncapped},
+    pileup::{cap_counts, merge_counts},
     prepare_call_targets,
     types::{SiteCounts, SiteKey},
 };
@@ -265,7 +265,6 @@ fn run_static_target_gpu_path(
         input_sample_resolvers: Arc::new(prepared.input_sample_resolvers.clone()),
         min_mapq: args.call.min_mapq,
         min_baseq: args.call.min_baseq,
-        max_depth: args.call.max_depth,
         verbose: ctx.verbose,
     };
     let (scan_rx, scan_handles) = spawn_scan_workers(
@@ -373,7 +372,6 @@ fn run_covered_gpu_path(
         input_sample_resolvers: Arc::new(prepared.input_sample_resolvers.clone()),
         min_mapq: args.call.min_mapq,
         min_baseq: args.call.min_baseq,
-        max_depth: args.call.max_depth,
         verbose: ctx.verbose,
     };
     let (scan_rx, scan_handles) = spawn_covered_scan_workers(&prepared.inputs, scan_params);
@@ -400,7 +398,7 @@ fn run_covered_gpu_path(
                         u32::MAX,
                         matrix_budget,
                     )?;
-                    merge_counts_uncapped(&mut all_counts, batch)?;
+                    merge_counts(&mut all_counts, batch)?;
                     pending.clear();
                     flush_count += 1;
                     if ctx.verbose > 0 {
@@ -438,7 +436,7 @@ fn run_covered_gpu_path(
             u32::MAX,
             matrix_budget,
         )?;
-        merge_counts_uncapped(&mut all_counts, batch)?;
+        merge_counts(&mut all_counts, batch)?;
         flush_count += 1;
     }
     cap_counts(&mut all_counts, args.call.max_depth);

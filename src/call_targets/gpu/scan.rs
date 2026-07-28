@@ -68,7 +68,6 @@ pub(crate) struct ScanWorkerParams {
     pub(crate) input_sample_resolvers: Arc<Vec<InputSampleResolver>>,
     pub(crate) min_mapq: u8,
     pub(crate) min_baseq: u8,
-    pub(crate) max_depth: u32,
     pub(crate) verbose: u8,
 }
 
@@ -264,7 +263,7 @@ pub(crate) fn scan_bam_worker(
 
     if params.verbose > 1 {
         eprintln!(
-            "[call_targets_gpu] finished input {} elapsed={:.2?} seen={} retained={} observations={} skipped_flags={} skipped_rg={} max_depth={}",
+            "[call_targets_gpu] finished input {} elapsed={:.2?} seen={} retained={} observations={} skipped_flags={} skipped_rg={}",
             path.display(),
             started.elapsed(),
             records_seen,
@@ -272,7 +271,6 @@ pub(crate) fn scan_bam_worker(
             observation_count,
             skipped_flags,
             skipped_rg,
-            params.max_depth
         );
     }
     send_scan_event(
@@ -377,7 +375,7 @@ pub(crate) fn scan_bam_covered_worker(
 
     if params.verbose > 1 {
         eprintln!(
-            "[call_targets_gpu] finished input {} elapsed={:.2?} seen={} retained={} observations={} skipped_flags={} skipped_rg={} max_depth={}",
+            "[call_targets_gpu] finished input {} elapsed={:.2?} seen={} retained={} observations={} skipped_flags={} skipped_rg={}",
             path.display(),
             started.elapsed(),
             records_seen,
@@ -385,7 +383,6 @@ pub(crate) fn scan_bam_covered_worker(
             observation_count,
             skipped_flags,
             skipped_rg,
-            params.max_depth
         );
     }
     send_covered_scan_event(
