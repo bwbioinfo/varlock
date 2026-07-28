@@ -21,7 +21,9 @@ use noodles_bam::io::Reader;
 use noodles_sam as sam;
 
 use crate::{CallTargetsArgs, ExecutionContext, log_verbose};
-use pileup::{InputResult, PileupSettings, ScanParams, merge_counts, process_input_bam};
+use pileup::{
+    InputResult, PileupSettings, ScanParams, cap_counts, merge_counts, process_input_bam,
+};
 use samples::{collect_sample_resolution, read_rg_map};
 use targets::load_targets;
 use types::{
@@ -74,7 +76,6 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
                 targets: &prepared.targets,
                 sample_count,
                 min_baseq: args.min_baseq,
-                max_depth: args.max_depth,
             },
         };
         let InputResult {
@@ -90,8 +91,10 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
                 skipped_rg
             );
         }
-        merge_counts(&mut all_counts, counts, args.max_depth)?;
+        merge_counts(&mut all_counts, counts)?;
     }
+    // Apply the depth policy once after every input has contributed raw counts.
+    cap_counts(&mut all_counts, args.max_depth);
     log_verbose(
         ctx,
         format!("{label} stage=scan elapsed={:.2?}", scan_started.elapsed()),

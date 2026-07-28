@@ -135,7 +135,7 @@ Core calling thresholds:
 | `--min-baseq` | Minimum base quality. |
 | `--min-alt-count` | Minimum selected ALT count across samples. |
 | `--min-alt-fraction` | Minimum selected ALT fraction across samples. |
-| `--max-depth` | Per-site depth cap used while accumulating counts. |
+| `--max-depth` | Per-sample depth cap applied once after raw counts from all inputs have been merged. |
 
 ## Inputs
 
@@ -298,6 +298,11 @@ site. The selected ALT is the highest-count non-reference A/C/G/T base after
 summing counts across samples. Per-sample genotype fields are still written for
 the selected ALT.
 
+`--max-depth` is applied once per sample and site after every input has
+contributed its raw base counts. When a site exceeds the cap, counts are reduced
+proportionally with deterministic tie-breaking. This makes output independent of
+BAM input order, GPU scan batches, and no-target GPU flush thresholds.
+
 For tumor/normal work, use paired calling thresholds in addition to the global
 thresholds so a globally selected ALT must also satisfy tumor and normal sample
 constraints.
@@ -432,9 +437,9 @@ varlock call-targets \
   --output sample.gpu.covered.vcf.gz
 ```
 
-No-target GPU mode flushes covered observations in batches, merges raw counts,
-and applies `--max-depth` once before output so results do not depend on flush
-threshold. The flush threshold can be tuned:
+No-target GPU mode flushes covered observations in batches and uses the same
+final `--max-depth` policy as CPU and static-target GPU calling. The flush
+threshold can be tuned:
 
 ```bash
 varlock call-targets \
