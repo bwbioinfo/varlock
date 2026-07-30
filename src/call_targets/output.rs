@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     fs::File,
     io::Write,
@@ -20,7 +21,9 @@ use noodles_tabix as tabix;
 use crate::{CallTargetsArgs, ExecutionContext, IndexType, log_verbose};
 
 use super::reference::{FastaIndex, open_fasta_index};
-use super::types::{PairedCallingConfig, SiteCounts, SiteKey, base_index};
+use super::types::{
+    IndelAllele, IndelCounts, IndelKey, PairedCallingConfig, SiteCounts, SiteKey, base_index,
+};
 
 pub(crate) struct CallTargetsOutputState {
     writer: bgzf::io::Writer<File>,
@@ -42,57 +45,70 @@ struct WriteMetrics {
     index_update_ns: u64,
 }
 
-pub(crate) fn write_call_targets_output(
-    args: &CallTargetsArgs,
-    ctx: &ExecutionContext,
-    label: &str,
-    prepared_reference: &Path,
-    output_path: &Path,
-    ref_names: &[String],
-    sample_names: &[String],
-    paired: Option<&PairedCallingConfig>,
-    counts: BTreeMap<SiteKey, SiteCounts>,
-) -> Result<()> {
-    let total_sites = counts.len();
-    let mut state = begin_call_targets_output(
-        args,
-        ctx,
-        label,
-        prepared_reference,
-        output_path,
-        ref_names,
-        sample_names,
-        paired,
-    )?;
-    write_call_targets_output_chunk(
-        &mut state,
-        args,
-        ctx,
-        label,
-        ref_names,
-        paired,
-        counts,
-        Some(total_sites),
-    )?;
-    finish_call_targets_output(state, args, ctx, label, ref_names)
+pub(crate) struct CallTargetsOutputContext<'a> {
+    pub(crate) args: &'a CallTargetsArgs,
+    pub(crate) ctx: &'a ExecutionContext,
+    pub(crate) label: &'a str,
+    pub(crate) ref_names: &'a [String],
+    pub(crate) paired: Option<&'a PairedCallingConfig>,
 }
 
-pub(crate) fn begin_call_targets_output(
-    args: &CallTargetsArgs,
-    ctx: &ExecutionContext,
-    label: &str,
+pub(crate) fn write_call_targets_output(
+    output_context: CallTargetsOutputContext<'_>,
     prepared_reference: &Path,
     output_path: &Path,
-    ref_names: &[String],
     sample_names: &[String],
-    paired: Option<&PairedCallingConfig>,
+    counts: BTreeMap<SiteKey, SiteCounts>,
+    indel_counts: BTreeMap<IndelKey, IndelCounts>,
+) -> Result<()> {
+    let mut calls = Vec::with_capacity(counts.len() + indel_counts.len());
+    if output_context.args.emit_snvs() {
+        calls.extend(
+            counts
+                .into_iter()
+                .map(|(key, counts)| OutputCall::Snv { key, counts }),
+        );
+    }
+    if output_context.args.emit_indels() {
+        calls.extend(
+            indel_counts
+                .into_iter()
+                .map(|(key, counts)| OutputCall::Indel { key, counts }),
+        );
+    }
+    calls.sort_unstable_by(OutputCall::compare);
+    let total_calls = calls.len();
+    let mut state = begin_call_targets_output(
+        &output_context,
+        prepared_reference,
+        output_path,
+        sample_names,
+    )?;
+    for call in calls {
+        write_call_targets_output_call(&mut state, &output_context, call, Some(total_calls))?;
+    }
+    finish_call_targets_output(
+        state,
+        output_context.args,
+        output_context.ctx,
+        output_context.label,
+        output_context.ref_names,
+    )
+}
+
+fn begin_call_targets_output(
+    output_context: &CallTargetsOutputContext<'_>,
+    prepared_reference: &Path,
+    output_path: &Path,
+    sample_names: &[String],
 ) -> Result<CallTargetsOutputState> {
     let stage_started = Instant::now();
     let fasta = open_fasta_index(prepared_reference)?;
     log_verbose(
-        ctx,
+        output_context.ctx,
         format!(
-            "{label} stage=open_reference elapsed={:.2?}",
+            "{} stage=open_reference elapsed={:.2?}",
+            output_context.label,
             stage_started.elapsed()
         ),
     );
@@ -107,11 +123,18 @@ pub(crate) fn begin_call_targets_output(
     let output_file = File::create(output_path)
         .with_context(|| format!("failed to create output {}", output_path.display()))?;
     let mut writer = bgzf::io::writer::Builder::default().build_from_writer(output_file);
-    write_vcf_header(&mut writer, args, ref_names, sample_names, &fasta, paired)?;
+    write_vcf_header(
+        &mut writer,
+        output_context.args,
+        output_context.ref_names,
+        sample_names,
+        &fasta,
+        output_context.paired,
+    )?;
 
-    let csi_indexer = matches!(args.index_type, IndexType::Csi)
+    let csi_indexer = matches!(output_context.args.index_type, IndexType::Csi)
         .then(binning_index::Indexer::<BinnedIndex>::default);
-    let tbi_indexer = matches!(args.index_type, IndexType::Tbi).then(|| {
+    let tbi_indexer = matches!(output_context.args.index_type, IndexType::Tbi).then(|| {
         let mut indexer = tabix::index::Indexer::default();
         let header = TabixHeader::builder()
             .set_format(TabixFormat::Vcf)
@@ -138,136 +161,226 @@ pub(crate) fn begin_call_targets_output(
     })
 }
 
-pub(crate) fn write_call_targets_output_chunk(
+enum OutputCall {
+    Snv { key: SiteKey, counts: SiteCounts },
+    Indel { key: IndelKey, counts: IndelCounts },
+}
+
+impl OutputCall {
+    fn sort_key(&self) -> (usize, u32, u8) {
+        match self {
+            Self::Snv { key, .. } => (key.reference_sequence_id, key.position, 0),
+            Self::Indel { key, .. } => (key.reference_sequence_id, key.position, 1),
+        }
+    }
+
+    fn compare(&self, other: &Self) -> Ordering {
+        let order = self.sort_key().cmp(&other.sort_key());
+        if order != Ordering::Equal {
+            return order;
+        }
+        match (self, other) {
+            (Self::Indel { key: left, .. }, Self::Indel { key: right, .. }) => left.cmp(right),
+            _ => Ordering::Equal,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SampleAlleleDepth {
+    depth: u32,
+    ref_count: u32,
+    alt_count: u32,
+}
+
+fn write_call_targets_output_call(
     state: &mut CallTargetsOutputState,
-    args: &CallTargetsArgs,
-    ctx: &ExecutionContext,
-    label: &str,
-    ref_names: &[String],
-    paired: Option<&PairedCallingConfig>,
-    counts: BTreeMap<SiteKey, SiteCounts>,
+    output_context: &CallTargetsOutputContext<'_>,
+    call: OutputCall,
     total_sites: Option<usize>,
 ) -> Result<()> {
-    for (key, site_counts) in counts {
-        state.visited_sites += 1;
-        let ref_name = ref_names
-            .get(key.reference_sequence_id)
-            .context("reference sequence id out of range")?;
-
-        let fasta_lookup_started = Instant::now();
-        let ref_base = state.fasta.fetch_base(ref_name, key.position)?;
-        state.write_metrics.fasta_lookup_ns = state
-            .write_metrics
-            .fasta_lookup_ns
-            .saturating_add(elapsed_ns(fasta_lookup_started));
-
-        let filter_eval_started = Instant::now();
-        if base_index(ref_base).is_none() {
-            state.write_metrics.filter_eval_ns = state
+    state.visited_sites += 1;
+    let (reference_sequence_id, position, ref_bases, alt_bases, sample_depths) = match call {
+        OutputCall::Snv { key, counts } => {
+            let ref_name = output_context
+                .ref_names
+                .get(key.reference_sequence_id)
+                .context("reference sequence id out of range")?;
+            let fasta_lookup_started = Instant::now();
+            let ref_base = state.fasta.fetch_base(ref_name, key.position)?;
+            state.write_metrics.fasta_lookup_ns = state
                 .write_metrics
-                .filter_eval_ns
-                .saturating_add(elapsed_ns(filter_eval_started));
-            continue;
+                .fasta_lookup_ns
+                .saturating_add(elapsed_ns(fasta_lookup_started));
+            let (Some(alt_base), _) =
+                choose_alt(ref_base, &counts, output_context.args.min_alt_count)?
+            else {
+                return Ok(());
+            };
+            let ref_idx = base_index(ref_base).context("invalid reference base")?;
+            let alt_idx = base_index(alt_base).context("invalid alternate base")?;
+            let sample_depths: Vec<SampleAlleleDepth> = counts
+                .per_sample
+                .iter()
+                .map(|sample| SampleAlleleDepth {
+                    depth: sample.iter().sum(),
+                    ref_count: sample[ref_idx],
+                    alt_count: sample[alt_idx],
+                })
+                .collect();
+            (
+                key.reference_sequence_id,
+                key.position,
+                vec![ref_base],
+                vec![alt_base],
+                sample_depths,
+            )
         }
-        let (alt_base, total_alt) = choose_alt(ref_base, &site_counts, args.min_alt_count)?;
-        if alt_base.is_none() {
-            state.write_metrics.filter_eval_ns = state
+        OutputCall::Indel { key, counts } => {
+            let ref_name = output_context
+                .ref_names
+                .get(key.reference_sequence_id)
+                .context("reference sequence id out of range")?;
+            let reference_len = match &key.allele {
+                IndelAllele::Insertion(_) => 1,
+                IndelAllele::Deletion(length) => length
+                    .checked_add(1)
+                    .context("indel deletion length exceeds VCF coordinate range")?,
+            };
+            let fasta_lookup_started = Instant::now();
+            let ref_bases = state
+                .fasta
+                .fetch_bases(ref_name, key.position, reference_len)?;
+            state.write_metrics.fasta_lookup_ns = state
                 .write_metrics
-                .filter_eval_ns
-                .saturating_add(elapsed_ns(filter_eval_started));
-            continue;
-        }
-
-        let alt_base = alt_base.expect("checked");
-        let total_dp: u32 = site_counts
-            .per_sample
-            .iter()
-            .map(|counts| counts.iter().sum::<u32>())
-            .sum();
-        if total_dp == 0 {
-            state.write_metrics.filter_eval_ns = state
-                .write_metrics
-                .filter_eval_ns
-                .saturating_add(elapsed_ns(filter_eval_started));
-            continue;
-        }
-
-        let alt_fraction = total_alt as f64 / total_dp as f64;
-        if alt_fraction < args.min_alt_fraction {
-            state.write_metrics.filter_eval_ns = state
-                .write_metrics
-                .filter_eval_ns
-                .saturating_add(elapsed_ns(filter_eval_started));
-            continue;
-        }
-        let paired_call = match paired {
-            Some(config) => match evaluate_paired_call(config, alt_base, &site_counts)? {
-                Some(call) => Some(call),
-                None => {
-                    state.write_metrics.filter_eval_ns = state
-                        .write_metrics
-                        .filter_eval_ns
-                        .saturating_add(elapsed_ns(filter_eval_started));
-                    continue;
+                .fasta_lookup_ns
+                .saturating_add(elapsed_ns(fasta_lookup_started));
+            if !ref_bases.iter().all(|&base| base_index(base).is_some()) {
+                return Ok(());
+            }
+            let alt_bases = match &key.allele {
+                IndelAllele::Insertion(inserted) => {
+                    let mut alt = vec![ref_bases[0]];
+                    alt.extend(inserted);
+                    alt
                 }
-            },
-            None => None,
-        };
+                IndelAllele::Deletion(_) => vec![ref_bases[0]],
+            };
+            let sample_depths: Vec<SampleAlleleDepth> = counts
+                .per_sample
+                .iter()
+                .map(|sample| SampleAlleleDepth {
+                    depth: sample.iter().sum(),
+                    ref_count: sample[0],
+                    alt_count: sample[1],
+                })
+                .collect();
+            (
+                key.reference_sequence_id,
+                key.position,
+                ref_bases,
+                alt_bases,
+                sample_depths,
+            )
+        }
+    };
+    let ref_name = output_context
+        .ref_names
+        .get(reference_sequence_id)
+        .context("reference sequence id out of range")?;
+    let total_alt = sample_depths
+        .iter()
+        .map(|sample| sample.alt_count)
+        .sum::<u32>();
+    let total_dp = sample_depths.iter().map(|sample| sample.depth).sum::<u32>();
+    let filter_eval_started = Instant::now();
+    if total_alt < output_context.args.min_alt_count
+        || total_dp == 0
+        || allele_fraction(total_alt, total_dp) < output_context.args.min_alt_fraction
+    {
         state.write_metrics.filter_eval_ns = state
             .write_metrics
             .filter_eval_ns
             .saturating_add(elapsed_ns(filter_eval_started));
+        return Ok(());
+    }
+    let paired_call = match output_context.paired {
+        Some(config) => match evaluate_paired_depths(config, &sample_depths)? {
+            Some(call) => Some(call),
+            None => {
+                state.write_metrics.filter_eval_ns = state
+                    .write_metrics
+                    .filter_eval_ns
+                    .saturating_add(elapsed_ns(filter_eval_started));
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+    state.write_metrics.filter_eval_ns = state
+        .write_metrics
+        .filter_eval_ns
+        .saturating_add(elapsed_ns(filter_eval_started));
 
-        let vcf_write_started = Instant::now();
-        let chunk_start = state.writer.virtual_position();
-        write_vcf_record(
-            &mut state.writer,
-            ref_name,
-            key.position,
-            ref_base,
-            alt_base,
+    let vcf_write_started = Instant::now();
+    let chunk_start = state.writer.virtual_position();
+    write_vcf_record(
+        &mut state.writer,
+        VcfRecord {
+            chrom: ref_name,
+            pos: position,
+            ref_bases: &ref_bases,
+            alt_bases: &alt_bases,
             total_dp,
-            paired_call.as_ref(),
-            &site_counts,
-        )?;
-        state.written_variants += 1;
-        let chunk_end = state.writer.virtual_position();
-        state.write_metrics.vcf_write_ns = state
-            .write_metrics
-            .vcf_write_ns
-            .saturating_add(elapsed_ns(vcf_write_started));
+            paired_call: paired_call.as_ref(),
+            sample_depths: &sample_depths,
+        },
+    )?;
+    state.written_variants += 1;
+    let chunk_end = state.writer.virtual_position();
+    state.write_metrics.vcf_write_ns = state
+        .write_metrics
+        .vcf_write_ns
+        .saturating_add(elapsed_ns(vcf_write_started));
 
-        let index_update_started = Instant::now();
-        let chunk = Chunk::new(chunk_start, chunk_end);
-        let start = Position::try_from(key.position as usize)
-            .context("invalid VCF position for indexing")?;
-        if let Some(indexer) = state.csi_indexer.as_mut() {
-            indexer
-                .add_record(Some((key.reference_sequence_id, start, start, true)), chunk)
-                .context("failed to update CSI index")?;
-        }
-        if let Some(indexer) = state.tbi_indexer.as_mut() {
-            indexer
-                .add_record(ref_name, start, start, chunk)
-                .context("failed to update TBI index")?;
-        }
-        state.write_metrics.index_update_ns = state
-            .write_metrics
-            .index_update_ns
-            .saturating_add(elapsed_ns(index_update_started));
+    let index_update_started = Instant::now();
+    let chunk = Chunk::new(chunk_start, chunk_end);
+    let start =
+        Position::try_from(position as usize).context("invalid VCF position for indexing")?;
+    let end_pos = position
+        .checked_add(u32::try_from(ref_bases.len()).context("VCF REF length exceeds u32")? - 1)
+        .context("VCF reference span exceeds u32")?;
+    let end =
+        Position::try_from(end_pos as usize).context("invalid VCF end position for indexing")?;
+    if let Some(indexer) = state.csi_indexer.as_mut() {
+        indexer
+            .add_record(Some((reference_sequence_id, start, end, true)), chunk)
+            .context("failed to update CSI index")?;
+    }
+    if let Some(indexer) = state.tbi_indexer.as_mut() {
+        indexer
+            .add_record(ref_name, start, start, chunk)
+            .context("failed to update TBI index")?;
+    }
+    state.write_metrics.index_update_ns = state
+        .write_metrics
+        .index_update_ns
+        .saturating_add(elapsed_ns(index_update_started));
 
-        let reached_total = total_sites
-            .map(|expected| state.visited_sites == expected)
-            .unwrap_or(false);
-        if ctx.verbose > 0 && (state.visited_sites.is_multiple_of(100_000) || reached_total) {
-            eprintln!(
-                "[{label}] write progress: sites={}/{} variants={} elapsed={:.2?}",
-                state.visited_sites,
-                total_sites.unwrap_or(state.visited_sites),
-                state.written_variants,
-                state.write_started.elapsed()
-            );
-        }
+    let reached_total = total_sites
+        .map(|expected| state.visited_sites == expected)
+        .unwrap_or(false);
+    if output_context.ctx.verbose > 0
+        && (state.visited_sites.is_multiple_of(100_000) || reached_total)
+    {
+        eprintln!(
+            "[{}] write progress: sites={}/{} variants={} elapsed={:.2?}",
+            output_context.label,
+            state.visited_sites,
+            total_sites.unwrap_or(state.visited_sites),
+            state.written_variants,
+            state.write_started.elapsed()
+        );
     }
 
     Ok(())
@@ -454,22 +567,30 @@ fn write_vcf_header<W: Write>(
     Ok(())
 }
 
+struct VcfRecord<'a> {
+    chrom: &'a str,
+    pos: u32,
+    ref_bases: &'a [u8],
+    alt_bases: &'a [u8],
+    total_dp: u32,
+    paired_call: Option<&'a PairedCallInfo>,
+    sample_depths: &'a [SampleAlleleDepth],
+}
+
 fn write_vcf_record<W: Write>(
     writer: &mut bgzf::io::Writer<W>,
-    chrom: &str,
-    pos: u32,
-    ref_base: u8,
-    alt_base: u8,
-    total_dp: u32,
-    paired_call: Option<&PairedCallInfo>,
-    site_counts: &SiteCounts,
+    record: VcfRecord<'_>,
 ) -> Result<()> {
+    let ref_bases =
+        std::str::from_utf8(record.ref_bases).context("invalid VCF reference allele")?;
+    let alt_bases =
+        std::str::from_utf8(record.alt_bases).context("invalid VCF alternate allele")?;
     write!(
         writer,
         "{}\t{}\t.\t{}\t{}\t.\tPASS\tDP={}",
-        chrom, pos, ref_base as char, alt_base as char, total_dp
+        record.chrom, record.pos, ref_bases, alt_bases, record.total_dp
     )?;
-    if let Some(call) = paired_call {
+    if let Some(call) = record.paired_call {
         write!(
             writer,
             ";PAIR={};SOMATIC;TUMOR_AF={:.6};NORMAL_AF={:.6};TUMOR_ALT_COUNT={};NORMAL_ALT_COUNT={};TUMOR_DP={};NORMAL_DP={}",
@@ -483,23 +604,22 @@ fn write_vcf_record<W: Write>(
         )?;
     }
     write!(writer, "\tGT:DP:AD")?;
-    let ref_idx = base_index(ref_base).context("invalid reference base")?;
-    let alt_idx = base_index(alt_base).context("invalid alt base")?;
 
-    for sample in &site_counts.per_sample {
-        let dp = sample.iter().sum::<u32>();
-        let ref_count = sample[ref_idx];
-        let alt_count = sample[alt_idx];
-        let gt = if dp == 0 {
+    for sample in record.sample_depths {
+        let gt = if sample.depth == 0 {
             "./.".to_string()
-        } else if alt_count == 0 {
+        } else if sample.alt_count == 0 {
             "0/0".to_string()
-        } else if ref_count == 0 {
+        } else if sample.ref_count == 0 {
             "1/1".to_string()
         } else {
             "0/1".to_string()
         };
-        write!(writer, "\t{}:{}:{},{}", gt, dp, ref_count, alt_count)?;
+        write!(
+            writer,
+            "\t{}:{}:{},{}",
+            gt, sample.depth, sample.ref_count, sample.alt_count
+        )?;
     }
     writeln!(writer)?;
     Ok(())
@@ -516,23 +636,38 @@ struct PairedCallInfo {
     normal_af: f64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn evaluate_paired_call(
     config: &PairedCallingConfig,
     alt_base: u8,
     site_counts: &SiteCounts,
 ) -> Result<Option<PairedCallInfo>> {
     let alt_idx = base_index(alt_base).context("invalid paired alt base")?;
-    let tumor = site_counts
+    let sample_depths = site_counts
         .per_sample
+        .iter()
+        .map(|sample| SampleAlleleDepth {
+            depth: sample.iter().sum(),
+            ref_count: 0,
+            alt_count: sample[alt_idx],
+        })
+        .collect::<Vec<_>>();
+    evaluate_paired_depths(config, &sample_depths)
+}
+
+fn evaluate_paired_depths(
+    config: &PairedCallingConfig,
+    sample_depths: &[SampleAlleleDepth],
+) -> Result<Option<PairedCallInfo>> {
+    let tumor = sample_depths
         .get(config.tumor_index)
         .context("paired tumor sample index out of range")?;
-    let normal = site_counts
-        .per_sample
+    let normal = sample_depths
         .get(config.normal_index)
         .context("paired normal sample index out of range")?;
 
-    let tumor_dp = tumor.iter().sum::<u32>();
-    let normal_dp = normal.iter().sum::<u32>();
+    let tumor_dp = tumor.depth;
+    let normal_dp = normal.depth;
     if config
         .normal_min_depth
         .is_some_and(|min_depth| normal_dp < min_depth)
@@ -540,8 +675,8 @@ fn evaluate_paired_call(
         return Ok(None);
     }
 
-    let tumor_alt_count = tumor[alt_idx];
-    let normal_alt_count = normal[alt_idx];
+    let tumor_alt_count = tumor.alt_count;
+    let normal_alt_count = normal.alt_count;
     let tumor_af = allele_fraction(tumor_alt_count, tumor_dp);
     let normal_af = allele_fraction(normal_alt_count, normal_dp);
 
@@ -625,6 +760,8 @@ mod tests {
     use super::super::types::SiteKey;
     use super::super::types::{PairedCallingConfig, PairedSampleRoles, SiteCounts};
     #[cfg(feature = "wgpu")]
+    use super::CallTargetsOutputContext;
+    #[cfg(feature = "wgpu")]
     use super::write_call_targets_output;
     use super::{choose_alt, evaluate_paired_call};
     #[cfg(feature = "wgpu")]
@@ -675,6 +812,8 @@ mod tests {
             min_baseq: 20,
             min_alt_count: 1,
             min_alt_fraction: 0.0,
+            no_indels: false,
+            indels_only: false,
             pair: Some("tumor=tumor,normal=normal".to_string()),
             tumor_min_alt_count: 3,
             tumor_min_alt_fraction: 0.2,
@@ -800,15 +939,18 @@ mod tests {
             threads: 1,
         };
         write_call_targets_output(
-            &args,
-            &ctx,
-            "call_targets_gpu",
+            CallTargetsOutputContext {
+                args: &args,
+                ctx: &ctx,
+                label: "call_targets_gpu",
+                ref_names: &["chr1".to_string()],
+                paired: Some(&paired_config()),
+            },
             &reference,
             &output,
-            &["chr1".to_string()],
             &["tumor".to_string(), "normal".to_string()],
-            Some(&paired_config()),
             site_counts,
+            BTreeMap::new(),
         )?;
 
         let mut reader = bgzf::io::Reader::new(File::open(output)?);

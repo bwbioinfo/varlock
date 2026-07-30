@@ -403,6 +403,14 @@ pub struct CallTargetsArgs {
     )]
     pub min_alt_fraction: f64,
 
+    /// Do not emit CIGAR-derived insertion and deletion calls
+    #[arg(long, conflicts_with = "indels_only")]
+    pub no_indels: bool,
+
+    /// Emit only CIGAR-derived insertion and deletion calls
+    #[arg(long, conflicts_with = "no_indels")]
+    pub indels_only: bool,
+
     /// Enable paired calling with tumor and normal sample names: tumor=S,normal=S
     #[arg(long = "pair", value_name = "tumor=S,normal=S")]
     pub pair: Option<String>,
@@ -448,6 +456,16 @@ pub struct CallTargetsArgs {
     /// Maximum read depth per sample at a site
     #[arg(long = "max-depth", value_name = "DP", default_value_t = 100_000u32)]
     pub max_depth: u32,
+}
+
+impl CallTargetsArgs {
+    pub(crate) fn emit_snvs(&self) -> bool {
+        !self.indels_only
+    }
+
+    pub(crate) fn emit_indels(&self) -> bool {
+        !self.no_indels
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

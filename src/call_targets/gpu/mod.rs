@@ -32,9 +32,12 @@ use super::{
     derive_output,
     observation::{self, build_target_frontier_index, build_target_site_map},
     output,
-    pileup::{cap_counts, merge_counts_uncapped},
+    pileup::{
+        PileupSettings, ScanParams, cap_counts, collect_indel_alt_counts, finalize_indel_counts,
+        merge_counts_uncapped, merge_indel_alt_counts,
+    },
     prepare_call_targets,
-    types::{SiteCounts, SiteKey},
+    types::{IndelCounts, IndelKey, SiteCounts, SiteKey},
 };
 
 pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()> {
@@ -82,7 +85,6 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
 
     let tier = primary.tier;
     let runtime = &primary.runtime;
-    let kernel = &primary.kernel;
     let matrix_budget = primary.matrix_budget;
     let max_obs_upload = primary.max_obs_upload;
     let flush_threshold = primary.flush_threshold;
@@ -119,29 +121,25 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
     let all_counts = if args.call.targets.is_some() {
         run_static_target_gpu_path(label, ctx, &args, &gpu_workers, &prepared, sample_count)?
     } else {
-        run_covered_gpu_path(
-            label,
-            ctx,
-            &args,
-            &runtime,
-            &kernel,
-            &prepared,
-            sample_count,
-            matrix_budget,
-            flush_threshold,
-        )?
+        run_covered_gpu_path(label, ctx, &args, primary, &prepared, sample_count)?
     };
 
+    let all_indel_counts =
+        collect_gpu_indel_counts(label, ctx, &args, &prepared, sample_count, &all_counts)?;
+
     output::write_call_targets_output(
-        &args.call,
-        ctx,
-        label,
+        output::CallTargetsOutputContext {
+            args: &args.call,
+            ctx,
+            label,
+            ref_names: &prepared.ref_names,
+            paired: prepared.paired.as_ref(),
+        },
         &prepared.prepared_reference,
         &output,
-        &prepared.ref_names,
         &prepared.sample_names,
-        prepared.paired.as_ref(),
         all_counts,
+        all_indel_counts,
     )?;
 
     log_verbose(
@@ -149,6 +147,46 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         format!("{label} stage=done elapsed={:.2?}", run_started.elapsed()),
     );
     Ok(())
+}
+
+fn collect_gpu_indel_counts(
+    label: &str,
+    ctx: &ExecutionContext,
+    args: &CallTargetsGpuArgs,
+    prepared: &super::types::PreparedCallTargets,
+    sample_count: usize,
+    site_counts: &BTreeMap<SiteKey, SiteCounts>,
+) -> Result<BTreeMap<IndelKey, IndelCounts>> {
+    if !args.call.emit_indels() {
+        return Ok(BTreeMap::new());
+    }
+
+    let started = Instant::now();
+    let mut all_alt_counts = BTreeMap::new();
+    for (path, sample_resolver) in prepared.inputs.iter().zip(&prepared.input_sample_resolvers) {
+        let scan = ScanParams {
+            sample_resolver,
+            min_mapq: args.call.min_mapq,
+            verbose: ctx.verbose,
+            pileup: PileupSettings {
+                targets: &prepared.targets,
+                sample_count,
+                min_baseq: args.call.min_baseq,
+                max_depth: args.call.max_depth,
+            },
+        };
+        merge_indel_alt_counts(&mut all_alt_counts, collect_indel_alt_counts(path, &scan)?)?;
+    }
+    let indel_counts = finalize_indel_counts(all_alt_counts, site_counts)?;
+    log_verbose(
+        ctx,
+        format!(
+            "{label} stage=scan_indels candidates={} elapsed={:.2?}",
+            indel_counts.len(),
+            started.elapsed()
+        ),
+    );
+    Ok(indel_counts)
 }
 
 struct GpuWorkerRuntime {
@@ -353,18 +391,15 @@ fn run_covered_gpu_path(
     label: &str,
     ctx: &ExecutionContext,
     args: &CallTargetsGpuArgs,
-    runtime: &runtime::GpuRuntime,
-    kernel: &kernel::GpuAggregateKernel,
+    worker: &GpuWorkerRuntime,
     prepared: &super::types::PreparedCallTargets,
     sample_count: usize,
-    matrix_budget: usize,
-    flush_threshold: usize,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
     log_verbose(
         ctx,
         format!(
             "{label} no --targets: streaming covered-site aggregation flush_threshold={}",
-            flush_threshold
+            worker.flush_threshold
         ),
     );
 
@@ -391,14 +426,14 @@ fn run_covered_gpu_path(
             Ok(CoveredScanEvent::Batch { observations, .. }) => {
                 total_observations += observations.len() as u64;
                 pending.extend(observations);
-                if pending.len() >= flush_threshold {
+                if pending.len() >= worker.flush_threshold {
                     let batch = flush_covered_batch(
                         &pending,
-                        kernel,
-                        runtime,
+                        &worker.kernel,
+                        &worker.runtime,
                         sample_count,
                         u32::MAX,
-                        matrix_budget,
+                        worker.matrix_budget,
                     )?;
                     merge_counts_uncapped(&mut all_counts, batch)?;
                     pending.clear();
@@ -432,11 +467,11 @@ fn run_covered_gpu_path(
     if !pending.is_empty() {
         let batch = flush_covered_batch(
             &pending,
-            kernel,
-            runtime,
+            &worker.kernel,
+            &worker.runtime,
             sample_count,
             u32::MAX,
-            matrix_budget,
+            worker.matrix_budget,
         )?;
         merge_counts_uncapped(&mut all_counts, batch)?;
         flush_count += 1;

@@ -13,6 +13,35 @@ pub(crate) struct SiteCounts {
     pub(crate) per_sample: Vec<[u32; 4]>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct IndelKey {
+    pub(crate) reference_sequence_id: usize,
+    /// One-based coordinate of the VCF anchor base.
+    pub(crate) position: u32,
+    pub(crate) allele: IndelAllele,
+}
+
+impl IndelKey {
+    pub(crate) fn anchor_site(&self) -> SiteKey {
+        SiteKey {
+            reference_sequence_id: self.reference_sequence_id,
+            position: self.position,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) enum IndelAllele {
+    Insertion(Vec<u8>),
+    Deletion(u32),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IndelCounts {
+    /// Per-sample biallelic [reference, alternate] read depths.
+    pub(crate) per_sample: Vec<[u32; 2]>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Interval {
     pub(crate) start: u64,

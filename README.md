@@ -1,6 +1,6 @@
 # varlock
 
-`varlock` is a Rust CLI for pileup-based SNV calling, VCF annotation, filtering,
+`varlock` is a Rust CLI for pileup-based small-variant calling, VCF annotation, filtering,
 and variant set comparison. The calling workflow reads one or more BAM files,
 counts A/C/G/T support at target sites or all covered positions, and writes a
 bgzipped VCF plus an index.
@@ -58,7 +58,7 @@ varlock --help
 
 Current subcommands:
 
-- `call-targets` - SNV calling from BAMs. When built with the `wgpu` feature,
+- `call-targets` - SNV and simple indel calling from BAMs. When built with the `wgpu` feature,
   it uses GPU acceleration by default and falls back to CPU if no compatible GPU
   is found. Pass `--cpu` to force CPU calling.
 - `call-targets-gpu` - compatibility alias for GPU-accelerated count
@@ -110,11 +110,18 @@ cargo run -- intersect --help
 
 ## Caller Overview
 
-`call-targets` performs simple SNV calling for A/C/G/T substitutions. It does
-not currently call indels, symbolic variants, or structural variants. The caller
-chooses the highest-count non-reference base at each retained site after
-summing support across samples, then writes per-sample `GT:DP:AD` fields for the
-selected ALT.
+`call-targets` emits A/C/G/T substitutions plus simple CIGAR-derived insertions
+and deletions by default. An indel is represented with the preceding aligned
+reference base as its VCF anchor: an insertion appends inserted bases to `ALT`,
+and a deletion extends `REF` across the deleted reference bases. Calls are not
+left-normalized. Symbolic variants, structural variants, and events without a
+usable left anchor are not emitted.
+
+For SNVs, the caller chooses the highest-count non-reference base at each
+retained site after summing support across samples. For indels, each observed
+allele is emitted as a biallelic record. `GT:DP:AD` uses the eligible depth at
+the anchor; indel `AD` is non-event depth followed by support for that specific
+indel allele.
 
 Core calling inputs:
 
@@ -294,9 +301,22 @@ varlock call-targets \
 ```
 
 `--min-alt-count` and `--min-alt-fraction` are evaluated across all samples at a
-site. The selected ALT is the highest-count non-reference A/C/G/T base after
-summing counts across samples. Per-sample genotype fields are still written for
-the selected ALT.
+site. SNVs use the highest-count non-reference A/C/G/T base after summing counts
+across samples; each supported indel allele is evaluated independently.
+Per-sample genotype fields are written for the selected SNV or indel allele.
+
+Indels require the left anchor to be inside the target BED interval. Inserted
+bases must meet `--min-baseq`; deletions use the qualifying anchor base. Disable
+indels while retaining SNVs with `--no-indels`, or emit indels alone with
+`--indels-only`. These two flags cannot be combined.
+
+```bash
+# SNVs only
+varlock call-targets --no-indels -i sample.bam -r hg38.fa -T targets.bed
+
+# Insertions and deletions only
+varlock call-targets --indels-only -i sample.bam -r hg38.fa -T targets.bed
+```
 
 For tumor/normal work, use paired calling thresholds in addition to the global
 thresholds so a globally selected ALT must also satisfy tumor and normal sample
@@ -444,8 +464,9 @@ varlock call-targets \
 ```
 
 GPU and CPU paths share the same sample collection, target loading, paired
-calling, and VCF output code. The GPU path accelerates count aggregation; it
-does not change the calling thresholds or output schema.
+calling, and VCF output code. The GPU path accelerates A/C/G/T base-count
+aggregation and scans CIGAR indels on the host, so GPU-backed calls retain the
+same indel output and thresholds as CPU calls.
 
 ## GPU Selection And Multi-GPU Static Targets
 

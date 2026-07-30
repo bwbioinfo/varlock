@@ -196,4 +196,20 @@ impl FastaIndex {
         });
         Ok(base.to_ascii_uppercase())
     }
+
+    pub(crate) fn fetch_bases(
+        &mut self,
+        ref_name: &str,
+        start_pos1: u32,
+        len: u32,
+    ) -> Result<Vec<u8>> {
+        let mut bases = Vec::with_capacity(len as usize);
+        for offset in 0..len {
+            let position = start_pos1
+                .checked_add(offset)
+                .context("reference position overflow while fetching allele")?;
+            bases.push(self.fetch_base(ref_name, position)?);
+        }
+        Ok(bases)
+    }
 }
