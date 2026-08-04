@@ -41,6 +41,7 @@ pub struct ReadSpec {
     mapping_quality: u8,
     base_quality: u8,
     read_group: Option<String>,
+    cigar: Option<Vec<Op>>,
 }
 
 impl ReadSpec {
@@ -53,11 +54,22 @@ impl ReadSpec {
             mapping_quality: 60,
             base_quality: 40,
             read_group: None,
+            cigar: None,
         }
     }
 
     pub fn with_read_group(mut self, read_group: impl Into<String>) -> Self {
         self.read_group = Some(read_group.into());
+        self
+    }
+
+    pub fn with_cigar(mut self, cigar: Vec<Op>) -> Self {
+        self.cigar = Some(cigar);
+        self
+    }
+
+    pub fn with_sequence(mut self, sequence: impl AsRef<[u8]>) -> Self {
+        self.sequence = sequence.as_ref().to_vec();
         self
     }
 
@@ -207,9 +219,32 @@ fn build_record(read: ReadSpec) -> Result<RecordBuf> {
         .with_context(|| format!("invalid alignment start for fixture read {}", read.name))?;
     let mapping_quality = MappingQuality::new(read.mapping_quality)
         .with_context(|| format!("invalid mapping quality for fixture read {}", read.name))?;
-    let cigar: Cigar = [Op::new(Kind::Match, read.sequence.len())]
-        .into_iter()
-        .collect();
+    let cigar_ops = read
+        .cigar
+        .unwrap_or_else(|| vec![Op::new(Kind::Match, read.sequence.len())]);
+    let query_len = cigar_ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.kind(),
+                Kind::Match
+                    | Kind::SequenceMatch
+                    | Kind::SequenceMismatch
+                    | Kind::Insertion
+                    | Kind::SoftClip
+            )
+        })
+        .map(|op| op.len())
+        .sum::<usize>();
+    if query_len != read.sequence.len() {
+        bail!(
+            "BAM fixture read {} CIGAR consumes {} query bases but sequence has {}",
+            read.name,
+            query_len,
+            read.sequence.len()
+        );
+    }
+    let cigar: Cigar = cigar_ops.into_iter().collect();
     let quality_scores = QualityScores::from(vec![read.base_quality; read.sequence.len()]);
     let mut data = Data::default();
     if let Some(read_group) = read.read_group {

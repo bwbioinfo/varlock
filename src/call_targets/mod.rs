@@ -21,12 +21,14 @@ use noodles_bam::io::Reader;
 use noodles_sam as sam;
 
 use crate::{CallTargetsArgs, ExecutionContext, log_verbose};
-use pileup::{InputResult, PileupSettings, ScanParams, merge_counts, process_input_bam};
+use pileup::{
+    InputResult, PileupSettings, ScanParams, merge_counts, merge_indel_counts, process_input_bam,
+};
 use samples::{collect_sample_resolution, read_rg_map};
 use targets::load_targets;
 use types::{
-    Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets, SiteCounts, SiteKey,
-    TargetIndex,
+    IndelCounts, IndelKey, Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets,
+    SiteCounts, SiteKey, TargetIndex,
 };
 
 fn derive_output(resolved_inputs: &[PathBuf], bamlist: Option<&std::path::Path>) -> PathBuf {
@@ -65,6 +67,7 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
 
     let scan_started = Instant::now();
     let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
+    let mut all_indel_counts: BTreeMap<IndelKey, IndelCounts> = BTreeMap::new();
     for (path, sample_resolver) in prepared.inputs.iter().zip(&prepared.input_sample_resolvers) {
         let scan = ScanParams {
             sample_resolver,
@@ -79,9 +82,10 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
         };
         let InputResult {
             counts,
+            indel_counts,
             skipped_flags,
             skipped_rg,
-        } = process_input_bam(path, &scan)?;
+        } = process_input_bam(path, &scan, args.emit_indels())?;
         if ctx.verbose > 1 {
             eprintln!(
                 "[{label}] scanned {} skipped_flags={} skipped_rg={}",
@@ -91,6 +95,9 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
             );
         }
         merge_counts(&mut all_counts, counts, args.max_depth)?;
+        if args.emit_indels() {
+            merge_indel_counts(&mut all_indel_counts, indel_counts, args.max_depth)?;
+        }
     }
     log_verbose(
         ctx,
@@ -98,15 +105,18 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
     );
 
     output::write_call_targets_output(
-        &args,
-        ctx,
-        label,
+        output::CallTargetsOutputContext {
+            args: &args,
+            ctx,
+            label,
+            ref_names: &prepared.ref_names,
+            paired: prepared.paired.as_ref(),
+        },
         &prepared.prepared_reference,
         &output,
-        &prepared.ref_names,
         &prepared.sample_names,
-        prepared.paired.as_ref(),
         all_counts,
+        all_indel_counts,
     )
 }
 
@@ -427,6 +437,8 @@ mod tests {
             min_baseq: 20,
             min_alt_count: 1,
             min_alt_fraction: 0.0,
+            no_indels: false,
+            indels_only: false,
             pair: Some(pair.to_string()),
             tumor_min_alt_count: 2,
             tumor_min_alt_fraction: 0.1,

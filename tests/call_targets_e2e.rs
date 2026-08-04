@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use noodles_bam as bam;
 use noodles_core::{Position, Region};
+use noodles_sam::alignment::record::cigar::{Op, op::Kind};
 use noodles_sam::header::record::value::map::read_group::tag::SAMPLE;
 use noodles_vcf::variant::record_buf::{
     info::field::Value as InfoValue,
@@ -203,6 +204,161 @@ fn call_targets_cpu_reads_bam_and_writes_typed_indexed_vcf() -> Result<()> {
             _ => unreachable!(),
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn call_targets_emits_indels_by_default_and_honors_indel_mode_flags() -> Result<()> {
+    let dir = tempdir()?;
+    let reference = write_fasta(
+        dir.path().join("reference.fa"),
+        &[("chr1", b"ACGTACGTACGTACGTACGT")],
+    )?;
+    // The fifth base is the VCF anchor for all three synthetic calls.
+    let targets = write_bed(dir.path().join("targets.bed"), &[("chr1", 4, 5)])?;
+
+    let mut builder = BamFixtureBuilder::new("chr1", 20);
+    builder.add_read_group("rg0", Some("sample_a"));
+    builder.add_read(ReadSpec::single_base("snv", 5, b'C').with_read_group("rg0"));
+    builder.add_read(
+        ReadSpec::single_base("insertion", 5, b'A')
+            .with_sequence(b"AGC")
+            .with_cigar(vec![
+                Op::new(Kind::Match, 1),
+                Op::new(Kind::Insertion, 1),
+                Op::new(Kind::Match, 1),
+            ])
+            .with_read_group("rg0"),
+    );
+    builder.add_read(
+        ReadSpec::single_base("deletion", 5, b'A')
+            .with_sequence(b"AG")
+            .with_cigar(vec![
+                Op::new(Kind::Match, 1),
+                Op::new(Kind::Deletion, 1),
+                Op::new(Kind::Match, 1),
+            ])
+            .with_read_group("rg0"),
+    );
+    let bam = builder.write(dir.path().join("sample.bam"))?;
+
+    let default_output = dir.path().join("default.vcf.gz");
+    run_call_targets(
+        &[&bam.path],
+        &reference.path,
+        &targets,
+        &default_output,
+        "csi",
+        &[],
+    )?;
+    let default_calls = read_vcf(&default_output)?;
+    let alleles = default_calls
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.variant_start().unwrap().get(),
+                record.reference_bases().to_string(),
+                record.alternate_bases().as_ref()[0].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        alleles,
+        [
+            (5, "A".to_string(), "C".to_string()),
+            (5, "A".to_string(), "AG".to_string()),
+            (5, "AC".to_string(), "A".to_string())
+        ]
+    );
+    for record in &default_calls.records {
+        let sample = record
+            .samples()
+            .get(&default_calls.header, "sample_a")
+            .context("missing sample_a values")?;
+        assert_eq!(sample.get("DP"), Some(Some(&SampleValue::Integer(3))));
+        assert_eq!(
+            sample.get("AD"),
+            Some(Some(&SampleValue::Array(SampleArray::Integer(vec![
+                Some(2),
+                Some(1),
+            ]))))
+        );
+    }
+
+    #[cfg(feature = "wgpu")]
+    {
+        let gpu_output = dir.path().join("gpu.vcf.gz");
+        let result = call_targets_command_with_backend(
+            &[&bam.path],
+            &reference.path,
+            &targets,
+            &gpu_output,
+            "csi",
+            &[],
+            false,
+        )
+        .output()?;
+        assert!(result.status.success(), "{}", output_text(&result));
+        let gpu_calls = read_vcf(&gpu_output)?;
+        let gpu_alleles = gpu_calls
+            .records
+            .iter()
+            .map(|record| {
+                (
+                    record.variant_start().unwrap().get(),
+                    record.reference_bases().to_string(),
+                    record.alternate_bases().as_ref()[0].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gpu_alleles, alleles);
+    }
+
+    let no_indels_output = dir.path().join("no-indels.vcf.gz");
+    run_call_targets(
+        &[&bam.path],
+        &reference.path,
+        &targets,
+        &no_indels_output,
+        "csi",
+        &["--no-indels"],
+    )?;
+    let no_indels = read_vcf(&no_indels_output)?;
+    assert_eq!(no_indels.records.len(), 1);
+    assert_eq!(no_indels.records[0].alternate_bases().as_ref()[0], "C");
+
+    let indels_only_output = dir.path().join("indels-only.vcf.gz");
+    run_call_targets(
+        &[&bam.path],
+        &reference.path,
+        &targets,
+        &indels_only_output,
+        "csi",
+        &["--indels-only"],
+    )?;
+    let indels_only = read_vcf(&indels_only_output)?;
+    assert_eq!(indels_only.records.len(), 2);
+    assert!(
+        indels_only
+            .records
+            .iter()
+            .all(|record| record.alternate_bases().as_ref()[0] != "C")
+    );
+
+    let conflicting_output = dir.path().join("conflicting.vcf.gz");
+    let result = call_targets_command(
+        &[&bam.path],
+        &reference.path,
+        &targets,
+        &conflicting_output,
+        "csi",
+        &["--no-indels", "--indels-only"],
+    )
+    .output()?;
+    assert!(!result.status.success(), "{}", output_text(&result));
+    assert!(output_text(&result).contains("cannot be used with"));
 
     Ok(())
 }
