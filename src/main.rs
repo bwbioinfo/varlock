@@ -115,13 +115,21 @@ pub struct AnnotateArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct FilterArgs {
-    /// Input VCF path (plain or .gz)
-    #[arg(short = 'i', long = "input", value_name = "VCF")]
+    /// Input variant path (VCF by default; BCF requires --input-format bcf)
+    #[arg(short = 'i', long = "input", value_name = "VARIANTS")]
     pub input: PathBuf,
 
-    /// Output VCF.gz path
-    #[arg(short = 'o', long = "output", value_name = "VCF_GZ")]
+    /// Output variant path (BGZF VCF by default; suffix does not select format)
+    #[arg(short = 'o', long = "output", value_name = "VARIANTS")]
     pub output: PathBuf,
+
+    /// Input encoding. BCF must be BGZF-compressed; VCF accepts plain or .gz
+    #[arg(long, value_enum, default_value_t = VariantFormat::Vcf)]
+    pub input_format: VariantFormat,
+
+    /// Output encoding, always BGZF-compressed. BCF requires CSI, not TBI
+    #[arg(long, value_enum, default_value_t = VariantFormat::Vcf)]
+    pub output_format: VariantFormat,
 
     /// Require an INFO field to be present; repeat for multiple fields
     #[arg(long = "require-info", value_name = "FIELD")]
@@ -472,6 +480,12 @@ impl CallTargetsArgs {
 pub enum IndexType {
     Csi,
     Tbi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum VariantFormat {
+    Vcf,
+    Bcf,
 }
 
 pub struct ExecutionContext {

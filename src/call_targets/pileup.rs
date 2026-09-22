@@ -27,7 +27,7 @@ pub(crate) struct ScanParams<'a> {
 
 pub(crate) struct InputResult {
     pub(crate) counts: BTreeMap<SiteKey, SiteCounts>,
-    pub(crate) indel_counts: BTreeMap<IndelKey, IndelCounts>,
+    pub(crate) indel_alt_counts: BTreeMap<IndelKey, Vec<u32>>,
     pub(crate) skipped_rg: usize,
     pub(crate) skipped_flags: usize,
 }
@@ -121,7 +121,7 @@ pub(crate) fn process_input_bam(
     }
 
     Ok(InputResult {
-        indel_counts: finalize_indel_counts(indel_alt_counts.unwrap_or_default(), &counts)?,
+        indel_alt_counts: indel_alt_counts.unwrap_or_default(),
         counts,
         skipped_rg,
         skipped_flags,
@@ -180,6 +180,7 @@ pub(crate) fn collect_indel_alt_counts(
     Ok(counts)
 }
 
+#[cfg(test)]
 pub(crate) fn merge_counts(
     dst: &mut BTreeMap<SiteKey, SiteCounts>,
     src: BTreeMap<SiteKey, SiteCounts>,
@@ -204,29 +205,6 @@ pub(crate) fn merge_counts(
     Ok(())
 }
 
-pub(crate) fn merge_indel_counts(
-    dst: &mut BTreeMap<IndelKey, IndelCounts>,
-    src: BTreeMap<IndelKey, IndelCounts>,
-    max_depth: u32,
-) -> Result<()> {
-    for (key, indel_counts) in src {
-        let sample_count = indel_counts.per_sample.len();
-        let dst_entry = dst.entry(key).or_insert_with(|| IndelCounts {
-            per_sample: vec![[0; 2]; sample_count],
-        });
-        if dst_entry.per_sample.len() != sample_count {
-            bail!("inconsistent sample vector length while merging indel counts");
-        }
-        for (dst_sample, src_sample) in dst_entry.per_sample.iter_mut().zip(indel_counts.per_sample)
-        {
-            merge_allele_counts_with_cap(dst_sample, src_sample, max_depth);
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "wgpu")]
 pub(crate) fn merge_indel_alt_counts(
     dst: &mut BTreeMap<IndelKey, Vec<u32>>,
     src: BTreeMap<IndelKey, Vec<u32>>,
@@ -247,6 +225,7 @@ pub(crate) fn merge_indel_alt_counts(
 pub(crate) fn finalize_indel_counts(
     indel_alt_counts: BTreeMap<IndelKey, Vec<u32>>,
     site_counts: &BTreeMap<SiteKey, SiteCounts>,
+    max_depth: u32,
 ) -> Result<BTreeMap<IndelKey, IndelCounts>> {
     let mut indel_counts = BTreeMap::new();
     for (key, alt_counts) in indel_alt_counts {
@@ -261,9 +240,12 @@ pub(crate) fn finalize_indel_counts(
             .iter()
             .zip(alt_counts)
             .map(|(base_counts, alt_count)| {
-                let depth = base_counts.iter().sum::<u32>();
-                let alt_count = alt_count.min(depth);
-                [depth - alt_count, alt_count]
+                let depth = base_counts.iter().map(|&n| u64::from(n)).sum::<u64>();
+                let alt_count = u64::from(alt_count).min(depth);
+                let raw = [depth - alt_count, alt_count];
+                let mut capped = [0; 2];
+                cap_wide_counts(&mut capped, raw, max_depth);
+                capped
             })
             .collect();
         indel_counts.insert(key, IndelCounts { per_sample });
@@ -297,7 +279,9 @@ pub(crate) fn merge_counts_uncapped(
     Ok(())
 }
 
-#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
+/// Cap once after all inputs and GPU batches are merged. Raw per-allele
+/// counts saturate at u32::MAX. Largest remainders win, with A,C,G,T ties
+/// (reference,alternate for indels). Wide integer arithmetic avoids overflow.
 pub(crate) fn cap_counts(counts: &mut BTreeMap<SiteKey, SiteCounts>, max_depth: u32) {
     for site_counts in counts.values_mut() {
         for sample_counts in &mut site_counts.per_sample {
@@ -317,20 +301,24 @@ fn merge_allele_counts_with_cap<const N: usize>(dst: &mut [u32; N], src: [u32; N
         return;
     }
 
-    let dst_total = dst.iter().sum::<u32>();
-    if dst_total >= max_depth {
+    let dst_total = dst.iter().map(|&n| u64::from(n)).sum::<u64>();
+    if dst_total >= u64::from(max_depth) {
         return;
     }
 
-    let space = max_depth - dst_total;
-    let src_total = src.iter().sum::<u32>();
+    let space = max_depth - dst_total as u32;
+    cap_wide_counts(dst, src.map(u64::from), space);
+}
+
+fn cap_wide_counts<const N: usize>(dst: &mut [u32; N], src: [u64; N], space: u32) {
+    let src_total = src.iter().sum::<u64>();
     if src_total == 0 {
         return;
     }
 
-    if src_total <= space {
+    if src_total <= u64::from(space) {
         for i in 0..N {
-            dst[i] += src[i];
+            dst[i] += src[i] as u32;
         }
         return;
     }
@@ -338,12 +326,12 @@ fn merge_allele_counts_with_cap<const N: usize>(dst: &mut [u32; N], src: [u32; N
     // Deterministic proportional merge when source exceeds remaining max_depth.
     let mut add = [0u32; N];
     let mut used = 0u32;
-    let mut remainders = [(0u64, 0usize); N];
+    let mut remainders = [(0u128, 0usize); N];
     for i in 0..N {
-        let weighted = src[i] as u64 * space as u64;
-        add[i] = (weighted / src_total as u64) as u32;
+        let weighted = u128::from(src[i]) * u128::from(space);
+        add[i] = (weighted / u128::from(src_total)) as u32;
         used += add[i];
-        remainders[i] = (weighted % src_total as u64, i);
+        remainders[i] = (weighted % u128::from(src_total), i);
     }
 
     let mut remaining = space - used;
@@ -352,7 +340,7 @@ fn merge_allele_counts_with_cap<const N: usize>(dst: &mut [u32; N], src: [u32; N
         if remaining == 0 {
             break;
         }
-        if add[i] < src[i] {
+        if u64::from(add[i]) < src[i] {
             add[i] += 1;
             remaining -= 1;
         }
@@ -433,12 +421,9 @@ fn pileup_record(
                                 per_sample: vec![[0; 4]; settings.sample_count],
                             });
                             let sample_counts = &mut entry.per_sample[sample_index];
-                            let dp = sample_counts.iter().sum::<u32>();
-                            if dp < settings.max_depth {
-                                sample_counts[idx] += 1;
-                                added += 1;
-                                accepted_anchor = u32::try_from(ref_pos).ok();
-                            }
+                            sample_counts[idx] = sample_counts[idx].saturating_add(1);
+                            added += 1;
+                            accepted_anchor = u32::try_from(ref_pos).ok();
                         }
                     }
                     last_anchor = accepted_anchor;
@@ -769,5 +754,48 @@ mod tests {
             single[&site(0, 1)].per_sample[0]
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod depth_policy_tests {
+    use super::*;
+
+    #[test]
+    fn above_cap_merge_is_order_and_partition_independent() -> Result<()> {
+        let key = SiteKey { reference_sequence_id: 0, position: 5 };
+        for batches in [
+            vec![[0, 6, 0, 0], [0, 0, 18, 0]],
+            vec![[0, 0, 18, 0], [0, 6, 0, 0]],
+            vec![[0, 6, 18, 0]],
+            vec![[0, 1, 3, 0]; 6],
+        ] {
+            let mut counts = BTreeMap::new();
+            for raw in batches {
+                merge_counts_uncapped(&mut counts, BTreeMap::from([
+                    (key, SiteCounts { per_sample: vec![raw] }),
+                ]))?;
+            }
+            cap_counts(&mut counts, 8);
+            assert_eq!(counts[&key].per_sample[0], [0, 2, 6, 0]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cap_handles_overflow_zero_and_rounding_ties() {
+        for (raw, cap, expected) in [
+            ([u32::MAX; 4], 7, [2, 2, 2, 1]),
+            ([1, 1, 1, 1], 3, [1, 1, 1, 0]),
+            ([1, 2, 3, 4], 0, [0; 4]),
+            ([1, 2, 3, 4], 10, [1, 2, 3, 4]),
+        ] {
+            let mut actual = [0; 4];
+            merge_sample_counts_with_cap(&mut actual, raw, cap);
+            assert_eq!(actual, expected);
+        }
+        let mut indel = [0; 2];
+        cap_wide_counts(&mut indel, [u64::from(u32::MAX) * 4, 0], u32::MAX);
+        assert_eq!(indel, [u32::MAX, 0]);
     }
 }

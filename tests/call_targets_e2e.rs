@@ -729,3 +729,124 @@ fn fixture_builder_generates_follow_up_edge_case_shapes() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn call_targets_dictionary_compatible_proceeds() -> Result<()> {
+    let dir = tempdir()?;
+    // FASTA order need not match BAM order.
+    let reference = write_fasta(
+        dir.path().join("reference.fa"),
+        &[("chr2", b"AAAA"), ("chr1", b"AAAA")],
+    )?;
+    let targets = write_bed(dir.path().join("targets.bed"), &[("chr1", 0, 4)])?;
+    let mut builder = BamFixtureBuilder::new("chr1", 4);
+    builder.add_reference("chr2", 4);
+    builder.add_read_group("rg0", Some("sample"));
+    builder.add_observations(2, b'C', 3, Some("rg0"));
+    let bam = builder.write(dir.path().join("sample.bam"))?;
+    let output = dir.path().join("calls.vcf.gz");
+    run_call_targets(&[&bam.path], &reference.path, &targets, &output, "csi", &[])?;
+    assert_eq!(read_vcf(&output)?.records.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn call_targets_dictionary_rejects_incompatible_before_output() -> Result<()> {
+    for (case, bam_name, bam_length, extra_reference, expected) in [
+        ("length", "chr1", 5, false, "chr1 (BAM=5 FASTA=4)"),
+        ("missing", "chr2", 4, false, "missing contigs in FASTA (1): chr2"),
+        ("extra", "chr1", 4, true, "extra contigs in FASTA (1): chr2"),
+    ] {
+        let dir = tempdir()?;
+        let mut sequences: Vec<(&str, &[u8])> = vec![("chr1", b"AAAA")];
+        if extra_reference {
+            sequences.push(("chr2", b"AAAA"));
+        }
+        let reference = write_fasta(dir.path().join("reference.fa"), &sequences)?;
+        let mut builder = BamFixtureBuilder::new(bam_name, bam_length);
+        builder.add_read_group("rg0", Some("sample"));
+        builder.add_observations(2, b'C', 3, Some("rg0"));
+        let bam = builder.write(dir.path().join("sample.bam"))?;
+        // An absent BED proves dictionary rejection precedes target loading,
+        // which itself precedes scanning in the shared CPU/GPU preparation.
+        let targets = dir.path().join("absent.bed");
+        let output = dir.path().join("calls.vcf.gz");
+        let result = call_targets_command(
+            &[&bam.path], &reference.path, &targets, &output, "csi", &[],
+        )
+        .output()?;
+        let text = output_text(&result);
+        assert!(!result.status.success(), "{case}: {text}");
+        assert!(text.contains(expected), "{case}: {text}");
+        assert!(text.contains(&bam.path.display().to_string()), "{text}");
+        assert!(text.contains(&reference.path.display().to_string()), "{text}");
+        assert!(text.contains("alignment reference build"), "{text}");
+        assert!(!output.exists(), "{case}: output created on failure");
+        assert!(!append_extension(&output, "csi").exists());
+        assert!(!append_extension(&output, "tbi").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn above_cap_alt_is_independent_of_read_order_targets_and_gpu_flush() -> Result<()> {
+    let dir = tempdir()?;
+    let reference = write_fasta(
+        dir.path().join("depth.fa"),
+        &[("chr1", b"AAAAAAAAAAAAAAAAAAAA")],
+    )?;
+    let targets = write_bed(dir.path().join("depth.bed"), &[("chr1", 4, 5)])?;
+    let mut baseline = None;
+    for reverse in [false, true] {
+        // Truncating the first eight observations used to select C, not G.
+        let mut builder = BamFixtureBuilder::new("chr1", 20);
+        builder.add_read_group("rg0", Some("sample_a"));
+        let groups = if reverse { [(b'G', 18), (b'C', 6)] } else { [(b'C', 6), (b'G', 18)] };
+        for (base, count) in groups {
+            builder.add_observations(5, base, count, Some("rg0"));
+        }
+        let bam = builder.write(dir.path().join(format!("depth-{reverse}.bam")))?;
+        #[cfg(not(feature = "wgpu"))]
+        let backends = [true];
+        #[cfg(feature = "wgpu")]
+        let backends = [true, false];
+        for cpu in backends {
+            for targeted in [true, false] {
+                for threshold in [1, 100_000] {
+                    let output = dir.path().join(format!("depth-{reverse}-{cpu}-{targeted}-{threshold}.vcf.gz"));
+                    let mut command = Command::new(env!("CARGO_BIN_EXE_varlock"));
+                    command.arg("call-targets");
+                    #[cfg(feature = "wgpu")]
+                    {
+                        if cpu { command.arg("--cpu"); }
+                        if !cpu {
+                            command.arg("--obs-flush-threshold").arg(threshold.to_string());
+                        }
+                    }
+                    command.arg("--input").arg(&bam.path)
+                        .arg("--reference").arg(&reference.path)
+                        .arg("--output").arg(&output)
+                        .args(["--max-depth", "8", "--no-indels"]);
+                    if targeted { command.arg("--targets").arg(&targets); }
+                    let result = command.output()?;
+                    assert!(result.status.success(), "{}", output_text(&result));
+                    let parsed = read_vcf(&output)?;
+                    assert_eq!(parsed.records.len(), 1);
+                    assert_eq!(parsed.records[0].alternate_bases().as_ref()[0], "G");
+                    assert_eq!(sample_depth(&parsed, "sample_a")?, 8);
+                    let sample = parsed.records[0].samples().get(&parsed.header, "sample_a")
+                        .context("missing sample_a")?;
+                    assert_eq!(sample.get("AD"), Some(Some(&SampleValue::Array(
+                        SampleArray::Integer(vec![Some(0), Some(6)])
+                    ))));
+                    if let Some(expected) = &baseline {
+                        assert_eq!(&parsed.records, expected);
+                    } else {
+                        baseline = Some(parsed.records);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

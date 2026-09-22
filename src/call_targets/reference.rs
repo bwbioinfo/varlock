@@ -35,6 +35,68 @@ struct FastaLineCache {
     bases: Vec<u8>,
 }
 
+/// A compact sequence dictionary entry (name + length) extracted from BAM or FASTA index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SeqEntry {
+    pub(crate) name: String,
+    pub(crate) length: u64,
+}
+
+/// Require identical contig names and lengths, independent of FASTA order.
+/// FAI has no M5 checksums, so this checks SN/LN only, not sequence identity.
+pub(crate) fn validate_bam_fasta_dict(
+    bam_seqs: &[SeqEntry],
+    fasta_seqs: &HashMap<String, u64>,
+    fasta_path: &Path,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut mismatched = Vec::new();
+    let bam_names: std::collections::HashSet<_> =
+        bam_seqs.iter().map(|entry| entry.name.as_str()).collect();
+    let mut extra: Vec<_> = fasta_seqs
+        .keys()
+        .filter(|name| !bam_names.contains(name.as_str()))
+        .cloned()
+        .collect();
+    extra.sort();
+
+    for entry in bam_seqs {
+        match fasta_seqs.get(&entry.name) {
+            None => missing.push(entry.name.clone()),
+            Some(&fasta_len) if fasta_len != entry.length => {
+                mismatched.push(format!(
+                    "{} (BAM={} FASTA={})",
+                    entry.name, entry.length, fasta_len
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if missing.is_empty() && extra.is_empty() && mismatched.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "BAM/FASTA sequence dictionary mismatch (reference: {}):",
+        fasta_path.display()
+    );
+    for (label, entries) in [
+        ("missing contigs in FASTA", missing),
+        ("extra contigs in FASTA", extra),
+        ("length mismatches", mismatched),
+    ] {
+        if !entries.is_empty() {
+            let preview = entries.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            msg.push_str(&format!("\n  {label} ({}): {preview}", entries.len()));
+            if entries.len() > 5 {
+                msg.push_str(&format!(", ... (+{} more)", entries.len() - 5));
+            }
+        }
+    }
+    bail!("{msg}\nUse the BAM alignment reference build with matching contigs and lengths, and regenerate its .fai if stale.");
+}
+
 pub(crate) fn open_fasta_index(reference: &Path) -> Result<FastaIndex> {
     let records = open_fai(reference)?;
     let reader = if is_bgzf_reference(reference) {
@@ -105,6 +167,14 @@ fn is_bgzf_reference(reference: &Path) -> bool {
 }
 
 impl FastaIndex {
+    /// Return a map of contig name → length derived from the FASTA index.
+    pub(crate) fn fasta_lengths(&self) -> HashMap<String, u64> {
+        self.records
+            .iter()
+            .map(|(name, rec)| (name.clone(), rec.length))
+            .collect()
+    }
+
     pub(crate) fn reference_lengths(&self, ref_names: &[String]) -> Result<Vec<u64>> {
         let mut lengths = Vec::with_capacity(ref_names.len());
         for name in ref_names {

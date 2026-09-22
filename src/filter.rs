@@ -1,3 +1,5 @@
+mod native;
+
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -11,7 +13,7 @@ use noodles_bgzf as bgzf;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 
 use crate::{
-    ExecutionContext, FilterArgs, IndexType, log_verbose,
+    ExecutionContext, FilterArgs, IndexType, VariantFormat, log_verbose,
     vcf::{
         IndexRecord, OutputIndex, VcfRecord, open_text_reader, parse_header_samples, parse_info_ref,
     },
@@ -65,7 +67,13 @@ struct FilterSpec {
 pub(crate) fn run(args: FilterArgs, ctx: &ExecutionContext) -> Result<()> {
     let started = Instant::now();
     let spec = FilterSpec::from_args(&args)?;
-    let metrics = filter_vcf(&args.input, &args.output, args.index_type, &spec)?;
+    let metrics = if args.input_format == VariantFormat::Vcf
+        && args.output_format == VariantFormat::Vcf
+    {
+        filter_vcf(&args.input, &args.output, args.index_type, &spec)?
+    } else {
+        native::filter(&args, &spec)?
+    };
 
     log_verbose(
         ctx,

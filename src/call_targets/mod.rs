@@ -22,12 +22,14 @@ use noodles_sam as sam;
 
 use crate::{CallTargetsArgs, ExecutionContext, log_verbose};
 use pileup::{
-    InputResult, PileupSettings, ScanParams, merge_counts, merge_indel_counts, process_input_bam,
+    InputResult, PileupSettings, ScanParams, cap_counts, finalize_indel_counts,
+    merge_counts_uncapped, merge_indel_alt_counts, process_input_bam,
 };
+use reference::{SeqEntry, validate_bam_fasta_dict};
 use samples::{collect_sample_resolution, read_rg_map};
 use targets::load_targets;
 use types::{
-    IndelCounts, IndelKey, Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets,
+    Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets,
     SiteCounts, SiteKey, TargetIndex,
 };
 
@@ -67,7 +69,7 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
 
     let scan_started = Instant::now();
     let mut all_counts: BTreeMap<SiteKey, SiteCounts> = BTreeMap::new();
-    let mut all_indel_counts: BTreeMap<IndelKey, IndelCounts> = BTreeMap::new();
+    let mut all_indel_alts = BTreeMap::new();
     for (path, sample_resolver) in prepared.inputs.iter().zip(&prepared.input_sample_resolvers) {
         let scan = ScanParams {
             sample_resolver,
@@ -82,7 +84,7 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
         };
         let InputResult {
             counts,
-            indel_counts,
+            indel_alt_counts,
             skipped_flags,
             skipped_rg,
         } = process_input_bam(path, &scan, args.emit_indels())?;
@@ -94,15 +96,18 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
                 skipped_rg
             );
         }
-        merge_counts(&mut all_counts, counts, args.max_depth)?;
+        merge_counts_uncapped(&mut all_counts, counts)?;
         if args.emit_indels() {
-            merge_indel_counts(&mut all_indel_counts, indel_counts, args.max_depth)?;
+            merge_indel_alt_counts(&mut all_indel_alts, indel_alt_counts)?;
         }
     }
     log_verbose(
         ctx,
         format!("{label} stage=scan elapsed={:.2?}", scan_started.elapsed()),
     );
+
+    let all_indel_counts = finalize_indel_counts(all_indel_alts, &all_counts, args.max_depth)?;
+    cap_counts(&mut all_counts, args.max_depth);
 
     output::write_call_targets_output(
         output::CallTargetsOutputContext {
@@ -165,7 +170,10 @@ pub(crate) fn prepare_call_targets(
     );
 
     let stage_started = Instant::now();
-    let (_header, ref_names, ref_name_to_id) = prepare_headers(&inputs)?;
+    // Validate every selected BAM before scanning records or creating call output.
+    let fasta_lengths = reference::open_fasta_index(&prepared_reference)?.fasta_lengths();
+    let (_header, ref_names, ref_name_to_id) =
+        prepare_headers(&inputs, &fasta_lengths, &prepared_reference)?;
     log_verbose(
         ctx,
         format!(
@@ -382,6 +390,8 @@ fn collect_bams_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> Resu
 
 fn prepare_headers(
     paths: &[PathBuf],
+    fasta_lengths: &HashMap<String, u64>,
+    reference: &std::path::Path,
 ) -> Result<(sam::Header, Vec<String>, HashMap<String, usize>)> {
     let mut reference_sequences = None;
     let mut header = None;
@@ -392,6 +402,17 @@ fn prepare_headers(
         let input_header = reader
             .read_header()
             .with_context(|| format!("failed to read header for {}", path.display()))?;
+
+        let bam_seqs: Vec<_> = input_header
+            .reference_sequences()
+            .iter()
+            .map(|(name, seq)| SeqEntry {
+                name: name.to_string(),
+                length: seq.length().get() as u64,
+            })
+            .collect();
+        validate_bam_fasta_dict(&bam_seqs, fasta_lengths, reference)
+            .with_context(|| format!("incompatible input BAM {}", path.display()))?;
 
         if let Some(ref refs) = reference_sequences {
             if refs != input_header.reference_sequences() {
@@ -410,8 +431,9 @@ fn prepare_headers(
     let mut ref_names = Vec::new();
     let mut ref_name_to_id = HashMap::new();
     for (i, (name, _)) in header.reference_sequences().iter().enumerate() {
-        ref_names.push(name.to_string());
-        ref_name_to_id.insert(name.to_string(), i);
+        let name_str = name.to_string();
+        ref_names.push(name_str.clone());
+        ref_name_to_id.insert(name_str.clone(), i);
     }
     Ok((header, ref_names, ref_name_to_id))
 }

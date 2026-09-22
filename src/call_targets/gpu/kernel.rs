@@ -38,7 +38,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base_idx = obs.sample_base & 3u;
     let local_site = obs.site_idx - params.site_start;
     let out_idx = ((local_site * params.sample_count + sample_idx) * 4u) + base_idx;
-    atomicAdd(&counts[out_idx], 1u);
+    // Saturate exactly like host counters, regardless of upload boundaries.
+    var old = atomicLoad(&counts[out_idx]);
+    loop {
+        if (old == 0xffffffffu) { break; }
+        let result = atomicCompareExchangeWeak(&counts[out_idx], old, old + 1u);
+        if (result.exchanged) { break; }
+        old = result.old_value;
+    }
 }
 "#;
 

@@ -118,7 +118,7 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
         );
     }
 
-    let all_counts = if args.call.targets.is_some() {
+    let mut all_counts = if args.call.targets.is_some() {
         run_static_target_gpu_path(label, ctx, &args, &gpu_workers, &prepared, sample_count)?
     } else {
         run_covered_gpu_path(label, ctx, &args, primary, &prepared, sample_count)?
@@ -126,6 +126,8 @@ pub(crate) fn run(args: CallTargetsGpuArgs, ctx: &ExecutionContext) -> Result<()
 
     let all_indel_counts =
         collect_gpu_indel_counts(label, ctx, &args, &prepared, sample_count, &all_counts)?;
+
+    cap_counts(&mut all_counts, args.call.max_depth);
 
     output::write_call_targets_output(
         output::CallTargetsOutputContext {
@@ -177,7 +179,7 @@ fn collect_gpu_indel_counts(
         };
         merge_indel_alt_counts(&mut all_alt_counts, collect_indel_alt_counts(path, &scan)?)?;
     }
-    let indel_counts = finalize_indel_counts(all_alt_counts, site_counts)?;
+    let indel_counts = finalize_indel_counts(all_alt_counts, site_counts, args.call.max_depth)?;
     log_verbose(
         ctx,
         format!(
@@ -476,7 +478,6 @@ fn run_covered_gpu_path(
         merge_counts_uncapped(&mut all_counts, batch)?;
         flush_count += 1;
     }
-    cap_counts(&mut all_counts, args.call.max_depth);
 
     log_verbose(
         ctx,

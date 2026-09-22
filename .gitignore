@@ -6,4 +6,5 @@
 *.db
 .beads-credential-key
 /references
+local-ci-evidence.json
 /test_data/

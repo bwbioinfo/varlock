@@ -11,7 +11,6 @@ use super::{
 };
 use crate::call_targets::{
     observation::Observation,
-    pileup::merge_sample_counts_with_cap,
     types::{SiteCounts, SiteKey},
 };
 
@@ -124,7 +123,7 @@ pub(crate) fn flush_chunk(
     runtime: &GpuRuntime,
     site_keys: &[SiteKey],
     sample_count: usize,
-    max_depth: u32,
+    _max_depth: u32,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
     let sample_count_u32 =
         u32::try_from(sample_count).context("sample count exceeds GPU parameter range")?;
@@ -149,7 +148,7 @@ pub(crate) fn flush_chunk(
         &counts,
         &site_keys[site_start..site_end],
         sample_count,
-        max_depth,
+        _max_depth,
     )
 }
 
@@ -201,7 +200,7 @@ fn materialize_counts(
     counts: &[u32],
     site_keys: &[SiteKey],
     sample_count: usize,
-    max_depth: u32,
+    _max_depth: u32,
 ) -> Result<BTreeMap<SiteKey, SiteCounts>> {
     let expected = site_keys
         .len()
@@ -228,10 +227,8 @@ fn materialize_counts(
                 counts[offset + 2],
                 counts[offset + 3],
             ];
-            let mut capped = [0u32; 4];
-            merge_sample_counts_with_cap(&mut capped, raw, max_depth);
-            any_nonzero |= capped.iter().any(|&value| value > 0);
-            per_sample.push(capped);
+            any_nonzero |= raw.iter().any(|&value| value > 0);
+            per_sample.push(raw);
         }
 
         if any_nonzero {
@@ -285,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn materialize_counts_returns_sparse_sites_and_caps_depth() -> Result<()> {
+    fn materialize_counts_returns_sparse_sites_without_capping() -> Result<()> {
         let site_keys = vec![site(0, 10), site(0, 11)];
         let counts = vec![
-            0, 5, 5, 0, // site 0 sample 0 -> capped to depth 6
+            0, 5, 5, 0, // site 0 sample 0 remains uncapped
             0, 0, 0, 0, // site 0 sample 1
             0, 0, 0, 0, // site 1 sample 0
             0, 0, 0, 0, // site 1 sample 1
@@ -297,7 +294,7 @@ mod tests {
         let materialized = materialize_counts(&counts, &site_keys, 2, 6)?;
 
         assert_eq!(materialized.len(), 1);
-        assert_eq!(materialized[&site(0, 10)].per_sample[0], [0, 3, 3, 0]);
+        assert_eq!(materialized[&site(0, 10)].per_sample[0], [0, 5, 5, 0]);
         assert_eq!(materialized[&site(0, 10)].per_sample[1], [0, 0, 0, 0]);
         Ok(())
     }

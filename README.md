@@ -68,13 +68,15 @@ Current subcommands:
 - `intersect` - exact-key VCF intersection and difference.
 
 Most commands write bgzipped VCF output and create a CSI index by default. Use
-`--index-type tbi` when a tabix index is required.
+`--index-type tbi` when a tabix index is required. The complete supported VCF
+behavior, explicit BCF limitation, preservation rules, and Genemancer migration
+guidance are documented in [the VCF/BCF processing contract](docs/vcf-bcf-processing-contract.md).
 
 ## Requirements
 
 - Rust toolchain with Cargo.
 - Input BAM files with coordinate-sorted alignments and readable headers.
-- Reference FASTA matching the BAM reference names.
+- Reference FASTA matching every selected BAM's contig names and lengths.
 - Optional BED targets for targeted calling.
 - Optional GPU support through the `wgpu` Cargo feature.
 
@@ -183,6 +185,16 @@ varlock call-targets \
 ## Reference FASTA
 
 The reference may be plain FASTA or bgzipped FASTA.
+
+Before scanning alignment records or creating VCF output, `call-targets` (CPU
+and GPU) compares each selected BAM's `@SQ` SN/LN dictionary with the selected
+FASTA's `.fai`. Contig order may differ between BAM and FASTA, but contig sets
+and lengths must match exactly. Missing or extra FASTA contigs and length
+mismatches fail with the input BAM, reference path, and bounded examples. Use
+the original alignment reference build and regenerate a stale `.fai` to resolve
+these errors. Existing BAM-to-BAM dictionary compatibility is also required.
+FAI has no M5 checksums, so no checksum is required or compared. This validation
+cannot detect different sequences with identical names and lengths.
 
 ```bash
 --reference hg38/hg38.fa
