@@ -77,3 +77,20 @@ cd /workspace/varlock && cargo fmt --all -- --check
 ## Recommended next step
 
 Apply the small reader transport/type repair to the real checkout, restore strict lint/format gates, and rerun default tests. Then explicitly provision the GPU-supported compiler and verify both GPU-feature compilation and relevant runtime paths. Track integration and real-data correctness separately from this build diagnosis.
+
+## Toolchain follow-up, October 8, 2026, 22:10 UTC
+
+The user requested Rust 1.99.0 in the shared workspace Dockerfile and delegated
+GPU runtime tests to their environment outside the container. The Dockerfile
+now pins `rust:1.99.0-bookworm`. Rust/Cargo 1.99.0 with matching rustfmt and Clippy
+are also installed in executable workspace storage for this existing guest.
+Select them with `source /workspace/project/.jbox/rust-env.sh`.
+
+On Rust 1.99.0, the original checkout's all-target GPU-feature check reaches
+the same reader E0107 instead of failing the compiler-version requirement.
+The isolated reader-repaired copy passes `cargo check --locked --offline
+--all-targets --features wgpu`. No GPU runtime test was executed and no Varlock
+production source was repaired. The log is
+`/home/jbox/.jcode/scratch/varlock-rust199-compile-20261008.log`.
+The actual image rebuild still requires host Docker/Jbox, which is unavailable
+inside this guest.
