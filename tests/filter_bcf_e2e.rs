@@ -182,3 +182,68 @@ fn other_commands_do_not_advertise_or_accept_bcf_format_flags() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn filter_compressed_vcf_to_bcf_preserves_selected_typed_records() -> Result<()> {
+    let dir = tempdir()?;
+    let mut reader = vcf::io::Reader::new(INPUT.as_bytes());
+    let expected_header = reader.read_header()?;
+    let expected_records: String = INPUT
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("chr1\t20\t"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+
+    for compression in ["gzip", "bgzf"] {
+        let input = dir.path().join(format!("{compression}.vcf.gz"));
+        let output = dir.path().join(format!("{compression}.bcf"));
+        if compression == "gzip" {
+            let mut writer = flate2::write::GzEncoder::new(
+                File::create(&input)?,
+                flate2::Compression::default(),
+            );
+            std::io::Write::write_all(&mut writer, INPUT.as_bytes())?;
+            writer.finish()?;
+        } else {
+            let mut writer = bgzf::io::Writer::new(File::create(&input)?);
+            std::io::Write::write_all(&mut writer, INPUT.as_bytes())?;
+            writer.try_finish()?;
+        }
+
+        success(run(
+            &input,
+            &output,
+            "vcf",
+            "bcf",
+            &["--require-info", "KEEP", "--sample-min-dp", "Tumor=10"],
+        )?);
+        let (header, records) = read_bcf(&output)?;
+        assert_eq!(records, expected_records, "{compression} selected records");
+        assert_eq!(
+            header.sample_names(),
+            expected_header.sample_names(),
+            "{compression} samples"
+        );
+        assert_eq!(
+            header.contigs(),
+            expected_header.contigs(),
+            "{compression} contigs"
+        );
+        assert_eq!(
+            header.infos(),
+            expected_header.infos(),
+            "{compression} INFO declarations"
+        );
+        assert_eq!(
+            header.formats(),
+            expected_header.formats(),
+            "{compression} FORMAT declarations"
+        );
+        assert_eq!(
+            header.other_records(),
+            expected_header.other_records(),
+            "{compression} metadata"
+        );
+    }
+    Ok(())
+}

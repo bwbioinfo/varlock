@@ -2,7 +2,12 @@
 //!
 //! The VCF rendering is only a view for existing predicates. Selected records
 //! are passed directly to noodles writers, never reparsed from this view.
-use std::{collections::HashMap, fs::File, io::Write as _, path::Path};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{BufRead, Write as _},
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use noodles_bcf as bcf;
@@ -49,10 +54,13 @@ pub(super) fn filter(args: &FilterArgs, spec: &FilterSpec) -> Result<FilterMetri
         }
     }
 
-    let mut reader: Box<dyn vcf::variant::io::Read> = match args.input_format {
+    let mut reader: Box<dyn vcf::variant::io::Read<Box<dyn BufRead>>> = match args.input_format {
         VariantFormat::Vcf => Box::new(vcf::io::Reader::new(open_text_reader(&args.input)?)),
-        // noodles-bcf 0.83 `new` wraps the File in a BGZF reader.
-        VariantFormat::Bcf => Box::new(bcf::io::Reader::new(File::open(&args.input)?)),
+        VariantFormat::Bcf => {
+            // Erase the transport only after BGZF decoding. `from` does not wrap it.
+            let input: Box<dyn BufRead> = Box::new(bgzf::io::Reader::new(File::open(&args.input)?));
+            Box::new(bcf::io::Reader::from(input))
+        }
     };
     let header = reader.read_variant_header().with_context(|| {
         format!(
