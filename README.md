@@ -100,6 +100,18 @@ cargo build --release --features wgpu
 cargo test --features wgpu
 ```
 
+The ordinary feature-enabled suite does not prove GPU parity: it skips the
+adapter-required depth regression. Run that regression explicitly on a host
+with a compatible wgpu adapter:
+
+```bash
+cargo test --features wgpu --test call_targets_e2e above_cap_gpu_matches_cpu_across_read_orders_targets_and_flush_thresholds -- --ignored --exact
+```
+
+The regression fails rather than falling back to CPU if no adapter is available.
+An available adapter may be software-backed, so identify it separately before
+claiming hardware GPU coverage.
+
 During development:
 
 ```bash

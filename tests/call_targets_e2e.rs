@@ -789,7 +789,18 @@ fn call_targets_dictionary_rejects_incompatible_before_output() -> Result<()> {
 }
 
 #[test]
-fn above_cap_alt_is_independent_of_read_order_targets_and_gpu_flush() -> Result<()> {
+fn above_cap_cpu_is_independent_of_read_order_and_targets() -> Result<()> {
+    exercise_above_cap_parity(false)
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+#[ignore = "requires an available wgpu adapter; run explicitly with --ignored"]
+fn above_cap_gpu_matches_cpu_across_read_orders_targets_and_flush_thresholds() -> Result<()> {
+    exercise_above_cap_parity(true)
+}
+
+fn exercise_above_cap_parity(include_gpu: bool) -> Result<()> {
     let dir = tempdir()?;
     let reference = write_fasta(
         dir.path().join("depth.fa"),
@@ -806,11 +817,8 @@ fn above_cap_alt_is_independent_of_read_order_targets_and_gpu_flush() -> Result<
             builder.add_observations(5, base, count, Some("rg0"));
         }
         let bam = builder.write(dir.path().join(format!("depth-{reverse}.bam")))?;
-        #[cfg(not(feature = "wgpu"))]
-        let backends = [true];
-        #[cfg(feature = "wgpu")]
-        let backends = [true, false];
-        for cpu in backends {
+        let backends: &[bool] = if include_gpu { &[true, false] } else { &[true] };
+        for &cpu in backends {
             for targeted in [true, false] {
                 for threshold in [1, 100_000] {
                     let output = dir.path().join(format!("depth-{reverse}-{cpu}-{targeted}-{threshold}.vcf.gz"));
@@ -820,6 +828,8 @@ fn above_cap_alt_is_independent_of_read_order_targets_and_gpu_flush() -> Result<
                     {
                         if cpu { command.arg("--cpu"); }
                         if !cpu {
+                            // A GPU parity result must never be a CPU fallback.
+                            command.arg("--require-gpu");
                             command.arg("--obs-flush-threshold").arg(threshold.to_string());
                         }
                     }
