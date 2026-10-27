@@ -86,7 +86,10 @@ pub(super) fn filter(args: &FilterArgs, spec: &FilterSpec) -> Result<FilterMetri
         view.get_mut().clear();
         view.write_variant_record(&header, record.as_ref())
             .with_context(|| {
-                format!("failed to decode record {} for predicates", metrics.input_records)
+                format!(
+                    "failed to decode record {} for predicates",
+                    metrics.input_records
+                )
             })?;
         let line = std::str::from_utf8(view.get_ref())?.trim_end_matches(['\r', '\n']);
         let fields = line.split('\t').collect::<Vec<_>>();
@@ -97,7 +100,10 @@ pub(super) fn filter(args: &FilterArgs, spec: &FilterSpec) -> Result<FilterMetri
             output
                 .write(&header, record.as_ref(), line)
                 .with_context(|| {
-                    format!("failed to write/index selected record {}", metrics.input_records)
+                    format!(
+                        "failed to write/index selected record {}",
+                        metrics.input_records
+                    )
                 })?;
             metrics.output_records += 1;
         }
@@ -171,13 +177,16 @@ impl Output {
                 index.add_record(&index_record, Chunk::new(start, writer.virtual_position()))?;
             }
             Self::Bcf {
-                writer, indexer, maps, previous, ..
+                writer,
+                indexer,
+                maps,
+                previous,
+                ..
             } => {
                 let name = record.reference_sequence_name(header)?;
-                let id = maps
-                    .contigs()
-                    .get_index_of(name)
-                    .with_context(|| format!("BCF output requires a contig declaration for {name}"))?;
+                let id = maps.contigs().get_index_of(name).with_context(|| {
+                    format!("BCF output requires a contig declaration for {name}")
+                })?;
                 let start = record
                     .variant_start()
                     .transpose()?
@@ -206,7 +215,10 @@ impl Output {
                 index.write(path)?;
             }
             Self::Bcf {
-                mut writer, indexer, reference_count, ..
+                mut writer,
+                indexer,
+                reference_count,
+                ..
             } => {
                 writer.try_finish()?;
                 let index_file = File::options()

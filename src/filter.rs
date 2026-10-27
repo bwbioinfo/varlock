@@ -67,13 +67,12 @@ struct FilterSpec {
 pub(crate) fn run(args: FilterArgs, ctx: &ExecutionContext) -> Result<()> {
     let started = Instant::now();
     let spec = FilterSpec::from_args(&args)?;
-    let metrics = if args.input_format == VariantFormat::Vcf
-        && args.output_format == VariantFormat::Vcf
-    {
-        filter_vcf(&args.input, &args.output, args.index_type, &spec)?
-    } else {
-        native::filter(&args, &spec)?
-    };
+    let metrics =
+        if args.input_format == VariantFormat::Vcf && args.output_format == VariantFormat::Vcf {
+            filter_vcf(&args.input, &args.output, args.index_type, &spec)?
+        } else {
+            native::filter(&args, &spec)?
+        };
 
     log_verbose(
         ctx,

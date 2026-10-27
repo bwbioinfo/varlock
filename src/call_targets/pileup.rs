@@ -15,7 +15,6 @@ pub(crate) struct PileupSettings<'a> {
     pub(crate) targets: &'a TargetIndex,
     pub(crate) sample_count: usize,
     pub(crate) min_baseq: u8,
-    pub(crate) max_depth: u32,
 }
 
 pub(crate) struct ScanParams<'a> {
@@ -763,7 +762,10 @@ mod depth_policy_tests {
 
     #[test]
     fn above_cap_merge_is_order_and_partition_independent() -> Result<()> {
-        let key = SiteKey { reference_sequence_id: 0, position: 5 };
+        let key = SiteKey {
+            reference_sequence_id: 0,
+            position: 5,
+        };
         for batches in [
             vec![[0, 6, 0, 0], [0, 0, 18, 0]],
             vec![[0, 0, 18, 0], [0, 6, 0, 0]],
@@ -772,9 +774,15 @@ mod depth_policy_tests {
         ] {
             let mut counts = BTreeMap::new();
             for raw in batches {
-                merge_counts_uncapped(&mut counts, BTreeMap::from([
-                    (key, SiteCounts { per_sample: vec![raw] }),
-                ]))?;
+                merge_counts_uncapped(
+                    &mut counts,
+                    BTreeMap::from([(
+                        key,
+                        SiteCounts {
+                            per_sample: vec![raw],
+                        },
+                    )]),
+                )?;
             }
             cap_counts(&mut counts, 8);
             assert_eq!(counts[&key].per_sample[0], [0, 2, 6, 0]);

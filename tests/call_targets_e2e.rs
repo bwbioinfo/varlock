@@ -754,7 +754,13 @@ fn call_targets_dictionary_compatible_proceeds() -> Result<()> {
 fn call_targets_dictionary_rejects_incompatible_before_output() -> Result<()> {
     for (case, bam_name, bam_length, extra_reference, expected) in [
         ("length", "chr1", 5, false, "chr1 (BAM=5 FASTA=4)"),
-        ("missing", "chr2", 4, false, "missing contigs in FASTA (1): chr2"),
+        (
+            "missing",
+            "chr2",
+            4,
+            false,
+            "missing contigs in FASTA (1): chr2",
+        ),
         ("extra", "chr1", 4, true, "extra contigs in FASTA (1): chr2"),
     ] {
         let dir = tempdir()?;
@@ -771,15 +777,17 @@ fn call_targets_dictionary_rejects_incompatible_before_output() -> Result<()> {
         // which itself precedes scanning in the shared CPU/GPU preparation.
         let targets = dir.path().join("absent.bed");
         let output = dir.path().join("calls.vcf.gz");
-        let result = call_targets_command(
-            &[&bam.path], &reference.path, &targets, &output, "csi", &[],
-        )
-        .output()?;
+        let result =
+            call_targets_command(&[&bam.path], &reference.path, &targets, &output, "csi", &[])
+                .output()?;
         let text = output_text(&result);
         assert!(!result.status.success(), "{case}: {text}");
         assert!(text.contains(expected), "{case}: {text}");
         assert!(text.contains(&bam.path.display().to_string()), "{text}");
-        assert!(text.contains(&reference.path.display().to_string()), "{text}");
+        assert!(
+            text.contains(&reference.path.display().to_string()),
+            "{text}"
+        );
         assert!(text.contains("alignment reference build"), "{text}");
         assert!(!output.exists(), "{case}: output created on failure");
         assert!(!append_extension(&output, "csi").exists());
@@ -812,7 +820,11 @@ fn exercise_above_cap_parity(include_gpu: bool) -> Result<()> {
         // Truncating the first eight observations used to select C, not G.
         let mut builder = BamFixtureBuilder::new("chr1", 20);
         builder.add_read_group("rg0", Some("sample_a"));
-        let groups = if reverse { [(b'G', 18), (b'C', 6)] } else { [(b'C', 6), (b'G', 18)] };
+        let groups = if reverse {
+            [(b'G', 18), (b'C', 6)]
+        } else {
+            [(b'C', 6), (b'G', 18)]
+        };
         for (base, count) in groups {
             builder.add_observations(5, base, count, Some("rg0"));
         }
@@ -821,34 +833,52 @@ fn exercise_above_cap_parity(include_gpu: bool) -> Result<()> {
         for &cpu in backends {
             for targeted in [true, false] {
                 for threshold in [1, 100_000] {
-                    let output = dir.path().join(format!("depth-{reverse}-{cpu}-{targeted}-{threshold}.vcf.gz"));
+                    let output = dir.path().join(format!(
+                        "depth-{reverse}-{cpu}-{targeted}-{threshold}.vcf.gz"
+                    ));
                     let mut command = Command::new(env!("CARGO_BIN_EXE_varlock"));
                     command.arg("call-targets");
                     #[cfg(feature = "wgpu")]
                     {
-                        if cpu { command.arg("--cpu"); }
+                        if cpu {
+                            command.arg("--cpu");
+                        }
                         if !cpu {
                             // A GPU parity result must never be a CPU fallback.
                             command.arg("--require-gpu");
-                            command.arg("--obs-flush-threshold").arg(threshold.to_string());
+                            command
+                                .arg("--obs-flush-threshold")
+                                .arg(threshold.to_string());
                         }
                     }
-                    command.arg("--input").arg(&bam.path)
-                        .arg("--reference").arg(&reference.path)
-                        .arg("--output").arg(&output)
+                    command
+                        .arg("--input")
+                        .arg(&bam.path)
+                        .arg("--reference")
+                        .arg(&reference.path)
+                        .arg("--output")
+                        .arg(&output)
                         .args(["--max-depth", "8", "--no-indels"]);
-                    if targeted { command.arg("--targets").arg(&targets); }
+                    if targeted {
+                        command.arg("--targets").arg(&targets);
+                    }
                     let result = command.output()?;
                     assert!(result.status.success(), "{}", output_text(&result));
                     let parsed = read_vcf(&output)?;
                     assert_eq!(parsed.records.len(), 1);
                     assert_eq!(parsed.records[0].alternate_bases().as_ref()[0], "G");
                     assert_eq!(sample_depth(&parsed, "sample_a")?, 8);
-                    let sample = parsed.records[0].samples().get(&parsed.header, "sample_a")
+                    let sample = parsed.records[0]
+                        .samples()
+                        .get(&parsed.header, "sample_a")
                         .context("missing sample_a")?;
-                    assert_eq!(sample.get("AD"), Some(Some(&SampleValue::Array(
-                        SampleArray::Integer(vec![Some(0), Some(6)])
-                    ))));
+                    assert_eq!(
+                        sample.get("AD"),
+                        Some(Some(&SampleValue::Array(SampleArray::Integer(vec![
+                            Some(0),
+                            Some(6)
+                        ]))))
+                    );
                     if let Some(expected) = &baseline {
                         assert_eq!(&parsed.records, expected);
                     } else {

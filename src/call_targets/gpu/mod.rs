@@ -174,7 +174,6 @@ fn collect_gpu_indel_counts(
                 targets: &prepared.targets,
                 sample_count,
                 min_baseq: args.call.min_baseq,
-                max_depth: args.call.max_depth,
             },
         };
         merge_indel_alt_counts(&mut all_alt_counts, collect_indel_alt_counts(path, &scan)?)?;

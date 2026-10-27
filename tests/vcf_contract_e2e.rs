@@ -10,7 +10,8 @@ use noodles_bgzf as bgzf;
 use tempfile::tempdir;
 
 const HEADER: &str = "##fileformat=VCFv4.3\n##source=contract-fixture\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
-const RECORDS: &str = "chr1\t10\trs10\tA\tC\t.\tPASS\tAF=0.05\nchr1\t11\trs11\tA\tG\t.\tPASS\tAF=0.20\n";
+const RECORDS: &str =
+    "chr1\t10\trs10\tA\tC\t.\tPASS\tAF=0.05\nchr1\t11\trs11\tA\tG\t.\tPASS\tAF=0.20\n";
 
 fn run(args: &[&str]) -> Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_varlock"))
@@ -42,23 +43,40 @@ fn write_reference(dir: &Path) -> Result<PathBuf> {
     let path = dir.join("reference.fa");
     write_plain(&path, ">chr1\nACGTACGTACGTACGTACGT\n")?;
     // FASTA index fields: name, length, sequence byte offset, bases/line, bytes/line.
-    write_plain(&PathBuf::from(format!("{}.fai", path.display())), "chr1\t20\t6\t20\t21\n")?;
+    write_plain(
+        &PathBuf::from(format!("{}.fai", path.display())),
+        "chr1\t20\t6\t20\t21\n",
+    )?;
     Ok(path)
 }
 
 fn assert_success(output: &Output) {
-    assert!(output.status.success(), "stdout:\n{}\nstderr:\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn assert_rejected(output: &Output) {
-    assert!(!output.status.success(), "unsupported or malformed input was accepted: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        !output.status.success(),
+        "unsupported or malformed input was accepted: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn assert_output_contract(output: &Path, index: &str, expected_record: &str) -> Result<String> {
     assert!(output.exists());
     assert!(output.to_string_lossy().ends_with(".vcf.gz"));
     let index_path = PathBuf::from(format!("{}.{}", output.display(), index));
-    assert!(index_path.exists(), "missing {} sidecar", index_path.display());
+    assert!(
+        index_path.exists(),
+        "missing {} sidecar",
+        index_path.display()
+    );
     let text = read_bgzf(output)?;
     assert!(text.contains("##fileformat=VCFv4.3"));
     assert!(text.contains(expected_record));
@@ -69,14 +87,37 @@ fn assert_output_contract(output: &Path, index: &str, expected_record: &str) -> 
 fn annotate_matrix_accepts_plain_and_bgzf_inputs_and_writes_both_indexes() -> Result<()> {
     let dir = tempdir()?;
     let database = dir.path().join("database.vcf");
-    write_plain(&database, &format!("{HEADER}chr1\t10\t.\tA\tC\t.\tPASS\tAF=0.25\n"))?;
+    write_plain(
+        &database,
+        &format!("{HEADER}chr1\t10\t.\tA\tC\t.\tPASS\tAF=0.25\n"),
+    )?;
 
-    for (suffix, make_input) in [("plain", write_plain as fn(&Path, &str) -> Result<()>), ("bgzf", write_bgzf)] {
-        let input = dir.path().join(format!("input-{suffix}.vcf{}", if suffix == "bgzf" { ".bgzf" } else { "" }));
+    for (suffix, make_input) in [
+        ("plain", write_plain as fn(&Path, &str) -> Result<()>),
+        ("bgzf", write_bgzf),
+    ] {
+        let input = dir.path().join(format!(
+            "input-{suffix}.vcf{}",
+            if suffix == "bgzf" { ".bgzf" } else { "" }
+        ));
         make_input(&input, &format!("{HEADER}{RECORDS}"))?;
         for index in ["csi", "tbi"] {
-            let output = dir.path().join(format!("annotated-{suffix}-{index}.vcf.gz"));
-            let output_result = run(&["annotate", "--input", input.to_str().unwrap(), "--database", &format!("db={}", database.display()), "--annotation", "db:AF=db_AF", "--output", output.to_str().unwrap(), "--index-type", index])?;
+            let output = dir
+                .path()
+                .join(format!("annotated-{suffix}-{index}.vcf.gz"));
+            let output_result = run(&[
+                "annotate",
+                "--input",
+                input.to_str().unwrap(),
+                "--database",
+                &format!("db={}", database.display()),
+                "--annotation",
+                "db:AF=db_AF",
+                "--output",
+                output.to_str().unwrap(),
+                "--index-type",
+                index,
+            ])?;
             assert_success(&output_result);
             let text = assert_output_contract(&output, index, "chr1\t10\trs10\tA\tC")?;
             assert!(text.contains("##INFO=<ID=db_AF"));
@@ -89,11 +130,27 @@ fn annotate_matrix_accepts_plain_and_bgzf_inputs_and_writes_both_indexes() -> Re
 #[test]
 fn filter_matrix_preserves_header_and_selected_source_record() -> Result<()> {
     let dir = tempdir()?;
-    for (suffix, make_input) in [("plain", write_plain as fn(&Path, &str) -> Result<()>), ("bgzf", write_bgzf)] {
-        let input = dir.path().join(format!("input-{suffix}.vcf{}", if suffix == "bgzf" { ".gz" } else { "" }));
+    for (suffix, make_input) in [
+        ("plain", write_plain as fn(&Path, &str) -> Result<()>),
+        ("bgzf", write_bgzf),
+    ] {
+        let input = dir.path().join(format!(
+            "input-{suffix}.vcf{}",
+            if suffix == "bgzf" { ".gz" } else { "" }
+        ));
         make_input(&input, &format!("{HEADER}{RECORDS}"))?;
         let output = dir.path().join(format!("filtered-{suffix}.vcf.gz"));
-        let result = run(&["filter", "--input", input.to_str().unwrap(), "--max-info", "AF=0.10", "--output", output.to_str().unwrap(), "--index-type", "tbi"])?;
+        let result = run(&[
+            "filter",
+            "--input",
+            input.to_str().unwrap(),
+            "--max-info",
+            "AF=0.10",
+            "--output",
+            output.to_str().unwrap(),
+            "--index-type",
+            "tbi",
+        ])?;
         assert_success(&result);
         let text = assert_output_contract(&output, "tbi", "chr1\t10\trs10\tA\tC")?;
         assert!(text.contains("##source=contract-fixture"));
@@ -108,15 +165,33 @@ fn intersect_matrix_matches_literal_keys_and_preserves_selected_source_header() 
     let left = dir.path().join("left.vcf");
     let right = dir.path().join("right.vcf.gz");
     write_plain(&left, &format!("{HEADER}{RECORDS}"))?;
-    write_bgzf(&right, &format!("{HEADER}chr1\t10\tother\tA\tC\t.\tPASS\tDB=1\n"))?;
+    write_bgzf(
+        &right,
+        &format!("{HEADER}chr1\t10\tother\tA\tC\t.\tPASS\tDB=1\n"),
+    )?;
 
     for index in ["csi", "tbi"] {
         let output = dir.path().join(format!("shared-{index}.vcf.gz"));
-        let result = run(&["intersect", "--left", left.to_str().unwrap(), "--right", right.to_str().unwrap(), "--mode", "shared", "--output", output.to_str().unwrap(), "--index-type", index])?;
+        let result = run(&[
+            "intersect",
+            "--left",
+            left.to_str().unwrap(),
+            "--right",
+            right.to_str().unwrap(),
+            "--mode",
+            "shared",
+            "--output",
+            output.to_str().unwrap(),
+            "--index-type",
+            index,
+        ])?;
         assert_success(&result);
         let text = assert_output_contract(&output, index, "chr1\t10\trs10\tA\tC")?;
         assert!(text.contains("##source=contract-fixture"));
-        assert!(!text.contains("DB=1"), "intersect must emit the selected source record");
+        assert!(
+            !text.contains("DB=1"),
+            "intersect must emit the selected source record"
+        );
     }
     Ok(())
 }
@@ -129,8 +204,23 @@ fn annotate_reference_normalization_matches_case_insensitive_alleles() -> Result
     let database = dir.path().join("db.vcf");
     let output = dir.path().join("normalized.vcf.gz");
     write_plain(&input, &format!("{HEADER}chr1\t2\t.\ta\tc\t.\tPASS\t.\n"))?;
-    write_plain(&database, &format!("{HEADER}chr1\t2\t.\tA\tC\t.\tPASS\tAF=0.75\n"))?;
-    let result = run(&["annotate", "--input", input.to_str().unwrap(), "--database", &format!("db={}", database.display()), "--annotation", "db:AF=db_AF", "--reference", reference.to_str().unwrap(), "--output", output.to_str().unwrap()])?;
+    write_plain(
+        &database,
+        &format!("{HEADER}chr1\t2\t.\tA\tC\t.\tPASS\tAF=0.75\n"),
+    )?;
+    let result = run(&[
+        "annotate",
+        "--input",
+        input.to_str().unwrap(),
+        "--database",
+        &format!("db={}", database.display()),
+        "--annotation",
+        "db:AF=db_AF",
+        "--reference",
+        reference.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ])?;
     assert_success(&result);
     let text = assert_output_contract(&output, "csi", "chr1\t2\t.\ta\tc")?;
     assert!(text.contains("db_AF=0.75"));
@@ -144,11 +234,20 @@ fn malformed_vcf_and_bcf_are_rejected_by_transforming_commands() -> Result<()> {
     write_plain(&malformed, &format!("{HEADER}chr1\tbad\n"))?;
     fs::write(&bcf, b"BCF\x02\x02not-a-text-vcf")?;
     let database = dir.path().join("db.vcf");
-    write_plain(&database, &format!("{HEADER}chr1\t10\t.\tA\tC\t.\tPASS\tAF=0.1\n"))?;
+    write_plain(
+        &database,
+        &format!("{HEADER}chr1\t10\t.\tA\tC\t.\tPASS\tAF=0.1\n"),
+    )?;
 
     let database_arg = format!("db={}", database.display());
     let cases = [
-        vec!["annotate", "--database", database_arg.as_str(), "--annotation", "db:AF=x"],
+        vec![
+            "annotate",
+            "--database",
+            database_arg.as_str(),
+            "--annotation",
+            "db:AF=x",
+        ],
         vec!["filter", "--max-info", "AF=1"],
         vec!["intersect", "--mode", "shared"],
     ];
@@ -156,9 +255,16 @@ fn malformed_vcf_and_bcf_are_rejected_by_transforming_commands() -> Result<()> {
         for case in &cases {
             let output = dir.path().join("rejected.vcf.gz");
             let mut args = case.clone();
-            if case[0] == "annotate" { args.extend(["--input", input.to_str().unwrap()]); }
-            else if case[0] == "filter" { args.extend(["--input", input.to_str().unwrap()]); }
-            else { args.extend(["--left", input.to_str().unwrap(), "--right", input.to_str().unwrap()]); }
+            if case[0] == "annotate" || case[0] == "filter" {
+                args.extend(["--input", input.to_str().unwrap()]);
+            } else {
+                args.extend([
+                    "--left",
+                    input.to_str().unwrap(),
+                    "--right",
+                    input.to_str().unwrap(),
+                ]);
+            }
             args.extend(["--output", output.to_str().unwrap()]);
             assert_rejected(&run(&args)?);
         }

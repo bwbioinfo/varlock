@@ -87,14 +87,21 @@ pub(crate) fn validate_bam_fasta_dict(
         ("length mismatches", mismatched),
     ] {
         if !entries.is_empty() {
-            let preview = entries.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let preview = entries
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             msg.push_str(&format!("\n  {label} ({}): {preview}", entries.len()));
             if entries.len() > 5 {
                 msg.push_str(&format!(", ... (+{} more)", entries.len() - 5));
             }
         }
     }
-    bail!("{msg}\nUse the BAM alignment reference build with matching contigs and lengths, and regenerate its .fai if stale.");
+    bail!(
+        "{msg}\nUse the BAM alignment reference build with matching contigs and lengths, and regenerate its .fai if stale."
+    );
 }
 
 pub(crate) fn open_fasta_index(reference: &Path) -> Result<FastaIndex> {

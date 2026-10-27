@@ -29,8 +29,8 @@ use reference::{SeqEntry, validate_bam_fasta_dict};
 use samples::{collect_sample_resolution, read_rg_map};
 use targets::load_targets;
 use types::{
-    Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets,
-    SiteCounts, SiteKey, TargetIndex,
+    Interval, PairedCallingConfig, PairedSampleRoles, PreparedCallTargets, SiteCounts, SiteKey,
+    TargetIndex,
 };
 
 fn derive_output(resolved_inputs: &[PathBuf], bamlist: Option<&std::path::Path>) -> PathBuf {
@@ -79,7 +79,6 @@ pub(crate) fn run_cpu(args: CallTargetsArgs, ctx: &ExecutionContext) -> Result<(
                 targets: &prepared.targets,
                 sample_count,
                 min_baseq: args.min_baseq,
-                max_depth: args.max_depth,
             },
         };
         let InputResult {
