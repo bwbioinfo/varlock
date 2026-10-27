@@ -808,6 +808,98 @@ fn above_cap_gpu_matches_cpu_across_read_orders_targets_and_flush_thresholds() -
     exercise_above_cap_parity(true)
 }
 
+#[test]
+fn above_cap_cpu_is_independent_of_bam_input_order() -> Result<()> {
+    exercise_above_cap_bam_order(false)
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+#[ignore = "requires an available wgpu adapter; run explicitly with --ignored"]
+fn above_cap_gpu_matches_cpu_across_bam_input_orders() -> Result<()> {
+    exercise_above_cap_bam_order(true)
+}
+
+fn exercise_above_cap_bam_order(include_gpu: bool) -> Result<()> {
+    let dir = tempdir()?;
+    let reference = write_fasta(
+        dir.path().join("reference.fa"),
+        &[("chr1", b"AAAAAAAAAAAAAAAAAAAA")],
+    )?;
+    let targets = write_bed(dir.path().join("targets.bed"), &[("chr1", 4, 5)])?;
+    let mut c_reads = BamFixtureBuilder::new("chr1", 20);
+    c_reads.add_read_group("rg0", Some("sample_a"));
+    c_reads.add_observations(5, b'C', 6, Some("rg0"));
+    let c_bam = c_reads.write(dir.path().join("c.bam"))?;
+    let mut g_reads = BamFixtureBuilder::new("chr1", 20);
+    g_reads.add_read_group("rg0", Some("sample_a"));
+    g_reads.add_observations(5, b'G', 18, Some("rg0"));
+    let g_bam = g_reads.write(dir.path().join("g.bam"))?;
+
+    let mut baseline = None;
+    for reverse in [false, true] {
+        let inputs = if reverse {
+            [&g_bam.path, &c_bam.path]
+        } else {
+            [&c_bam.path, &g_bam.path]
+        };
+        let backends: &[bool] = if include_gpu { &[true, false] } else { &[true] };
+        for &cpu in backends {
+            for targeted in [true, false] {
+                for threshold in [1, 100_000] {
+                    let output = dir.path().join(format!(
+                        "bam-order-{reverse}-{cpu}-{targeted}-{threshold}.vcf.gz"
+                    ));
+                    let mut command = Command::new(env!("CARGO_BIN_EXE_varlock"));
+                    command.arg("call-targets");
+                    #[cfg(feature = "wgpu")]
+                    if cpu {
+                        command.arg("--cpu");
+                    } else {
+                        command.args(["--require-gpu", "--obs-flush-threshold"]);
+                        command.arg(threshold.to_string());
+                    }
+                    for input in inputs {
+                        command.arg("--input").arg(input);
+                    }
+                    command
+                        .arg("--reference")
+                        .arg(&reference.path)
+                        .arg("--output")
+                        .arg(&output)
+                        .args(["--max-depth", "8", "--no-indels"]);
+                    if targeted {
+                        command.arg("--targets").arg(&targets);
+                    }
+                    let result = command.output()?;
+                    assert!(result.status.success(), "{}", output_text(&result));
+                    let parsed = read_vcf(&output)?;
+                    assert_eq!(parsed.records.len(), 1);
+                    assert_eq!(parsed.records[0].alternate_bases().as_ref()[0], "G");
+                    assert_eq!(sample_depth(&parsed, "sample_a")?, 8);
+                    let sample = parsed.records[0]
+                        .samples()
+                        .get(&parsed.header, "sample_a")
+                        .context("missing sample_a")?;
+                    assert_eq!(
+                        sample.get("AD"),
+                        Some(Some(&SampleValue::Array(SampleArray::Integer(vec![
+                            Some(0),
+                            Some(6)
+                        ]))))
+                    );
+                    if let Some(expected) = &baseline {
+                        assert_eq!(&parsed.records, expected);
+                    } else {
+                        baseline = Some(parsed.records);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn exercise_above_cap_parity(include_gpu: bool) -> Result<()> {
     let dir = tempdir()?;
     let reference = write_fasta(
