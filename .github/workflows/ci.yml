@@ -4,6 +4,7 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,13 +42,15 @@ jobs:
       - run: cargo test
 
   test-all-features:
-    name: test (all-features, manual)
+    name: test (all-features, hosted CPU, manual)
     runs-on: ubuntu-latest
-    # Run only on workflow_dispatch or when manually triggered; kept off the
-    # required-checks path because wgpu GPU features need special runners.
+    # Reachable only via workflow_dispatch; kept off the required-checks path.
+    # This is hosted CPU evidence for the commit under test. It is NOT GPU
+    # runtime evidence (ubuntu-latest has no GPU) and not local-ci.sh evidence.
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+      - run: echo "tested sha=$GITHUB_SHA (hosted, cpu-only)"
